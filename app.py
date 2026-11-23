@@ -4,6 +4,8 @@ import base64
 import binascii
 import hashlib
 import csv
+import inspect
+import math
 import json
 import os
 import re
@@ -16,13 +18,16 @@ from functools import lru_cache
 from importlib.resources import files
 from io import BytesIO, StringIO
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import api_examples
 
 from fastapi import Body, FastAPI, Header, HTTPException, Path as PathParam, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from starlette.routing import Match
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +37,20 @@ from pypinyin import lazy_pinyin
 
 ROOT = Path(__file__).parent
 DB = Path(os.getenv("COMMISSION_DB", ROOT / "var" / "studio.sqlite3"))
+# Reuse the published guide sections in the corresponding Swagger operations.
+GUIDE = (ROOT / "llms.txt").read_text(encoding="utf-8")
+GUIDE_SECTIONS = dict(section.split("\n", 1) for section in GUIDE.split("\n## ")[1:])
+
+
+def documented(*sections):
+    def decorate(endpoint):
+        parts = [inspect.getdoc(endpoint) or ""]
+        parts.extend(GUIDE_SECTIONS[section].strip() for section in sections)
+        endpoint.__doc__ = "\n\n".join(filter(None, parts))
+        return endpoint
+    return decorate
+
+
 MAX_IMAGE = 12 * 1024 * 1024
 
 
@@ -61,6 +80,7 @@ Status = Literal["未开始", "进行中", "已结稿"]
 
 
 class Settings(BaseModel):
+    """完整替换。每组去空白、删空项、保序去重后至少一项。省略使用内置默认值，首项作为以后保存的默认值。已有约稿不会被改写。"""
     contacts: list[str] = Field(
         default_factory=lambda: ["QQ", "微信", "B站", "Discord"]
     )
@@ -79,11 +99,11 @@ class Payment(BaseModel):
     """一行稿费。没有行 ID。PUT 按提交顺序替换整个数组，包括重复行。"""
     amount: Annotated[Decimal, WithJsonSchema({"anyOf": [
         {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 10**12, "multipleOf": 0.01},
-        {"type": "string", "pattern": r"^\s*[+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?\s*$"},
+        {"type": "string", "pattern": r"^(?!0+(?:\.0{1,2})?$)[0-9]{1,12}(?:\.[0-9]{1,2})?$"},
     ]}, mode="validation")] = Field(
-        gt=0, max_digits=14, decimal_places=2, description="人民币元，必须大于 0，整数部分最多 12 位，小数最多 2 位。建议传十进制字符串，如 1200.50，不加千位分隔符。响应金额为字符串，小数位数可变。"
+        gt=0, max_digits=14, decimal_places=2, description="人民币元，必须大于 0，整数部分最多 12 位，小数最多 2 位。建议传十进制字符串，如 1200.50，不加千位分隔符。规范给出推荐的十进制输入形式，服务兼容能精确解析的旧写法。响应金额为字符串，如 12.3、740.00，合计请用 Decimal。"
     )
-    date: PaymentDay = Field(default_factory=today, description="null 或空字符串表示付款约定，省略字段沿用当天日期。")
+    date: PaymentDay = Field(default_factory=today, description="null 或空字符串表示付款约定，省略字段按上海今天记为实收，PUT 和导入时也适用。")
     stage: str = Field("稿费", description="稿费阶段或用途，空白使用「稿费」")
     platform: str = Field("", description="留空使用设置中的首个收入平台")
 
@@ -113,19 +133,19 @@ class Attachment(BaseModel):
     id: str | None = Field(None, description="编辑时传回原附件 ID")
     name: str = "参考图"
     data: str | None = Field(
-        None, description="新图片或备份中的 Base64 编码，可含 data URL 前缀"
+        None, description="PNG/JPEG/GIF/WebP 原图最多 12 MiB，支持 Base64 或 data URL。提供 data 时新建图片；普通写入忽略同时提交的 id。备份输出纯 Base64。"
     )
 
 
 class Commission(BaseModel):
-    nickname: str = Field("", description="可留空，自动生成甲方编号")
+    nickname: str = Field("", description="空白时使用「甲方 」接 ID 前六字符大写，如甲方 AB12CD")
     contact_type: str = Field("", description="联系方式，如 QQ 或微信")
     contact: str = Field("", description="该联系方式对应的账号")
     title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
     requirements: str = Field("", description="详细需求说明")
     is_priority: bool = Field(False, description="插队标记，插队新建时自动设置，移动、延期、恢复保留标记，可在编辑时更改")
-    planned: Day | None = Field(None, description="预计开始日期，可留空")
-    started: Day | None = Field(None, description="实际开始日期，可留空")
+    planned: Day | None = Field(None, description="预计开始日期，null 清空，空串 422；列表和详情中无日期时省略")
+    started: Day | None = Field(None, description="实际开始日期，null 清空，空串 422；无日期时详情省略。开工时不会自动填写")
     status: Status = Field("未开始", description="结稿状态可选未开始、进行中、已结稿。已结稿的约稿进入历史列表。")
     queue: Queue = Field("normal", description="normal 表示排队中，deferred 表示延期等待。新建时默认 normal。")
     payments: list[Payment] = Field(default_factory=list, description="有序稿费行，无行 ID；PUT 覆盖整个数组，省略会清空。")
@@ -133,7 +153,7 @@ class Commission(BaseModel):
 
 
 class Saved(Commission):
-    brief_received: bool = Field(False, description="需求说明去除首尾空白后有内容，或至少有一张参考图时为 true")
+    brief_received: bool = Field(False, json_schema_extra={"readOnly": True}, description="需求说明去除首尾空白后有内容，或至少有一张参考图时为 true")
     id: str = Field(description="约稿 ID，用作 /api/commissions/{key} 中的 key")
     sample: bool = Field(False, description="示例数据标记，由示例接口或备份恢复设置；示例参与统计。")
 
@@ -145,6 +165,8 @@ class ClientHistory(BaseModel):
 
 
 class VersionedCommission(Saved):
+    """已保存的约稿。id、brief_received、sample、revision 均由服务产生。"""
+    sample: bool = Field(False, json_schema_extra={"readOnly": True}, description="是否为示例数据，示例计入统计")
     revision: str = Field(description="当前约稿正文的版本标记；PUT 在请求体中原样传回。仅移动顺序不会更新版本。")
 
 
@@ -158,7 +180,7 @@ class CommissionUpdate(Commission):
 
 
 class Card(VersionedCommission):
-    history: ClientHistory = Field(description="有账号时按联系方式与账号归集；无账号时按昵称归集，昵称仅对应一个已知账号时并入该账号。")
+    history: ClientHistory = Field(json_schema_extra={"readOnly": True}, description="有账号时按联系方式与账号归集；无账号时按昵称归集，昵称仅对应一个已知账号时并入该账号。")
 
     @computed_field(description="本单未填写支付日期的金额合计，仅队列 Card 提供；详情可自行合计 payments 中 date 为 null 的行。")
     @property
@@ -182,6 +204,7 @@ class PaymentRequest(BaseModel):
 
 
 class BackupCommission(Saved):
+    id: str = Field(min_length=1, max_length=80, pattern=r"^[A-Za-z0-9_-]+$")
     payment_requests: list[PaymentRequest] = Field(default_factory=list, description="已使用的幂等键及摘要，导入后仍可去重；旧备份可省略。")
 
 
@@ -274,43 +297,90 @@ async def lifespan(_):
     yield
 
 
-class ErrorMessage(BaseModel):
-    detail: str
+class ApiError(HTTPException):
+    def __init__(self, status, code, detail, *, revision=None):
+        super().__init__(status, detail)
+        self.code = code
+        self.revision = revision
 
 
 class InvalidField(BaseModel):
     loc: list[str | int]
     msg: str
     type: str
+    input: Any = None
+    ctx: dict[str, Any] | None = None
 
 
-class InvalidRequest(BaseModel):
+class ErrorResponse(BaseModel):
+    code: Literal["archived_commission", "before_target_archived", "before_target_not_found", "before_target_wrong_queue", "commission_not_found", "duplicate_attachment", "duplicate_payment_key", "idempotency_key_conflict", "image_not_found", "image_too_large", "invalid_attachment_reference", "invalid_backup_id", "invalid_image", "invalid_image_id", "invalid_transition", "origin_mismatch", "revision_conflict", "validation_error"]
     detail: str | list[InvalidField]
+    current_revision: str | None = Field(None, description="仅 revision_conflict 返回最新版本")
 
 
-def write_errors(*, missing=False, conflict=None, images=False):
+def json_example(value):
+    return {"content": {"application/json": {"example": value}}}
+
+
+def header_spec(description):
+    return {"description": description, "schema": {"type": "string"}}
+
+
+ETAG_HEADER = {"ETag": header_spec('约稿版本，双引号中的值等于 revision。PUT 使用正文 revision 校验。')}
+
+
+def version_headers(record):
+    return {"ETag": '"' + record["revision"] + '"'}
+
+
+def no_content(db, key):
+    row = db.execute("SELECT revision FROM jobs WHERE id=?", (key,)).fetchone()
+    return Response(status_code=204, headers=version_headers(row))
+
+
+def write_errors(*, missing=False, conflict=None, images=False, validation=True):
     errors = {
-        403: {"model": ErrorMessage, "description": "写请求的 Origin 与服务地址不一致"},
-        422: {"model": InvalidRequest, "description": "参数校验失败或业务数据无效。按 detail 的字符串或数组形态读取。"},
+        403: {"model": ErrorResponse, "description": "写请求的 Origin 与服务地址不一致"},
+        422: {"model": ErrorResponse, "description": "参数校验失败或业务数据无效。按 detail 的字符串或数组形态读取。"},
     }
+    if not validation:
+        del errors[422]
     if missing:
-        errors[404] = {"model": ErrorMessage, "description": "路径 key 对应的约稿不存在"}
+        errors[404] = {"model": ErrorResponse, "description": "路径 key 对应的约稿不存在"}
     if conflict:
-        errors[409] = {"model": ErrorMessage, "description": conflict}
+        errors[409] = {"model": ErrorResponse, "description": conflict}
     if images:
-        errors[413] = {"model": ErrorMessage, "description": "单张参考图超过 12 MiB 限制"}
+        errors[413] = {"model": ErrorResponse, "description": "单张原图上限 12 MiB，Base64 载荷超过 16,777,216 字符返回 413"}
     return errors
 
 
 app = FastAPI(
     title="稿序 API",
-    version="1.1.0",
+    version="1.2.0",
+    openapi_tags=[{"name": name, "description": desc} for name, desc in (
+        ("约稿", "约稿正文、参考信息与甲方联想"), ("排队", "活动队列的状态与顺序"),
+        ("收款", "登记稿费与查询收款明细"), ("附件", "原图和缩略图"), ("设置", "联系与支付方式"),
+        ("统计", "按上海日期汇总收入"), ("工作台", "按页面读取一致快照"), ("数据", "备份、财务导出和示例"))],
+    responses={500: {"description": "服务内部错误，响应可能为纯文本。核对写入结果后再决定是否重试。"}},
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
     servers=[{"url": "/"}],
-    description="智能体请先读 [API 调用指南](/llms.txt)，再按本 OpenAPI 定义构造请求。以 CNY 记账，日期使用上海时区。日期接受 YYYY-MM-DD、YYYYMMDD、YYMMDD（前缀 20，如 991231 表示 2099-12-31），输出为 YYYY-MM-DD。接口无需凭据，浏览器使用同源地址，服务不提供跨域 CORS。列表全量返回。",
+    description="本规范描述当前 API；[调用指南](/llms.txt) 提供操作流程。info.version 是接口版本，备份格式 version 固定为 1。仅在可信网络或有访问控制的反向代理后部署。以 CNY 记账，日期使用上海时区。日期接受 YYYY-MM-DD、YYYYMMDD、YYMMDD（前缀 20，如 991231 表示 2099-12-31），输出为 YYYY-MM-DD。接口无需凭据，浏览器使用同源地址，服务不提供跨域 CORS。列表全量返回。\n\n" + GUIDE_SECTIONS["错误处理顺序"].strip(),
 )
+
+
+@app.exception_handler(ApiError)
+async def api_error_response(request, error):
+    payload = {"detail": error.detail, "code": error.code}
+    if error.revision is not None:
+        payload["current_revision"] = error.revision
+    return JSONResponse(payload, status_code=error.status_code)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_response(request, error):
+    return JSONResponse({"code": "validation_error", "detail": jsonable_encoder(error.errors(), custom_encoder={bytes: lambda value: value.decode(errors="replace"), float: lambda value: value if math.isfinite(value) else str(value)})}, status_code=422)
 
 
 @app.get("/healthz", include_in_schema=False)
@@ -326,10 +396,15 @@ async def check_request_origin(request: Request, call_next):
         and origin
         and origin != str(request.base_url).rstrip("/")
     ):
-        return JSONResponse({"detail": "来源与服务地址不一致"}, status_code=403)
+        return JSONResponse({"detail": "来源与服务地址不一致", "code": "origin_mismatch"}, status_code=403)
     response = await call_next(request)
     if request.url.path.startswith("/api/"):
         response.headers["Cache-Control"] = "private, no-store"
+        if response.status_code == 405:
+            methods = {method for route in app.routes if route.matches(request.scope)[0] == Match.PARTIAL
+                       for method in getattr(route, "methods", ())}
+            if methods:
+                response.headers["Allow"] = ", ".join(sorted(methods))
     return response
 
 
@@ -357,7 +432,7 @@ def rows(db):
 def lookup(db, key):
     row = db.execute("SELECT body,revision FROM jobs WHERE id=?", (key,)).fetchone()
     if not row:
-        raise HTTPException(404, "约稿不存在")
+        raise ApiError(404, "commission_not_found", "约稿不存在")
     return dict(commission_body(row["body"]), id=key, revision=row["revision"])
 
 
@@ -378,8 +453,14 @@ def reorder(db, keys):
 
 def move(db, key, before, queue):
     keys = active_keys(db, queue)
-    if key not in keys or (before is not None and before not in keys):
-        raise HTTPException(409, "队列已变化，请刷新")
+    if key not in keys:
+        raise ApiError(409, "archived_commission", "该约稿已结稿")
+    if before is not None and before not in keys:
+        target = db.execute("SELECT body FROM jobs WHERE id=?", (before,)).fetchone()
+        code = "before_target_not_found"
+        if target:
+            code = "before_target_archived" if json.loads(target[0])["status"] == "已结稿" else "before_target_wrong_queue"
+        raise ApiError(409, code, "队列已变化，请刷新")
     if key != before:
         keys.remove(key)
         keys.insert(len(keys) if before is None else keys.index(before), key)
@@ -389,7 +470,7 @@ def move(db, key, before, queue):
 def transfer(db, key, queue):
     item = lookup(db, key)
     if item["status"] == "已结稿":
-        raise HTTPException(409, "该约稿已结稿")
+        raise ApiError(409, "archived_commission", "该约稿已结稿")
     if item.get("queue", "normal") != queue:
         db.execute(
             "UPDATE jobs SET body=json_set(body,'$.queue',?) WHERE id=?", (queue, key)
@@ -410,7 +491,7 @@ def new_image(db, job, img, restore=False):
     try:
         encoded = img.data.split(",", 1)[-1]
         if len(encoded) > (MAX_IMAGE + 2) // 3 * 4:
-            raise HTTPException(413, "单张图片最多 12 MB")
+            raise ApiError(413, "image_too_large", "单张图片最多 12 MB")
         content = base64.b64decode(encoded, validate=True)
         with Image.open(BytesIO(content)) as picture:
             mime = {
@@ -431,13 +512,13 @@ def new_image(db, job, img, restore=False):
         Image.DecompressionBombError,
         UnidentifiedImageError,
     ):
-        raise HTTPException(422, "请选择有效的 PNG、JPEG、GIF 或 WebP 图片")
+        raise ApiError(422, "invalid_image", "请选择有效的 PNG、JPEG、GIF 或 WebP 图片")
     key = img.id if restore and img.id else uuid4().hex
     if (
         not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", key)
         or db.execute("SELECT 1 FROM images WHERE id=?", (key,)).fetchone()
     ):
-        raise HTTPException(422, "备份中的附件 ID 无效或重复")
+        raise ApiError(422, "invalid_image_id", "备份中的附件 ID 无效或重复")
     db.execute(
         "INSERT INTO images(id,job,mime,bytes,thumbnail) VALUES(?,?,?,?,?)",
         (key, job, mime, content, thumbnail),
@@ -465,7 +546,7 @@ def save(db, key, item, restore=False, sample=False):
         if img.id and img.id in seen:
             original = seen[img.id]
             if not restore or not img.data or original.data != img.data:
-                raise HTTPException(422, "同一约稿包含重复的附件 ID")
+                raise ApiError(422, "duplicate_attachment", "同一约稿包含重复的附件 ID")
             if img.name == original.name:
                 continue
             # Preserve a differently named alias from a legacy snapshot as a distinct attachment.
@@ -477,7 +558,7 @@ def save(db, key, item, restore=False, sample=False):
         elif img.id in existing:
             image_id = img.id
         else:
-            raise HTTPException(422, "图片附件不存在")
+            raise ApiError(422, "invalid_attachment_reference", "图片附件不存在")
         refs.append({"id": image_id, "name": img.name})
     removed = existing - {r["id"] for r in refs}
     db.executemany("DELETE FROM images WHERE id=?", [(i,) for i in removed])
@@ -523,7 +604,10 @@ def histories(records):
     summary="列出约稿及甲方历史，可按状态和队列筛选",
     response_model=list[Card],
     response_model_exclude_none=True,
+    responses={200: json_example([api_examples.CARD]),
+               422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
 )
+@documented('队列、筛选和顺位')
 def list_commissions(status: Status | None = None, queue: Queue | None = None):
     """省略过滤条件时返回全部（含已结稿），按存储顺位、同位按插入顺序排列，可混合多个队列。传 queue 仅返回该队未结稿的约稿；查看历史用 status=已结稿 并省略 queue。"""
     with database() as db:
@@ -549,7 +633,9 @@ def commission_cards(records, status=None, queue=None):
     tags=["收款"],
     summary="列出所有甲方的逐笔收款，按支付日期倒序",
     response_model=list[Receipt],
+    responses={200: json_example([api_examples.RECEIPT])},
 )
+@documented('金额、日期与查询未收款')
 def receipts():
     with database() as db:
         return receipt_rows(rows(db))
@@ -578,9 +664,12 @@ def receipt_rows(records):
     status_code=201,
     response_model=VersionedCommission,
     response_model_exclude_none=True,
-    responses=write_errors(images=True, conflict="before 目标不存在、已结稿或在其他队列"),
+    responses={201: {"headers": {**ETAG_HEADER, "Location": header_spec("新单详情路径")}},
+               **write_errors(images=True, conflict="before 目标不存在、已结稿或在其他队列")},
 )
+@documented('队列、筛选和顺位')
 def create(
+    response: Response,
     item: Annotated[Commission, Body(openapi_examples=api_examples.CREATE)],
     before: str | None = Query(None, description="位置填在 URL 查询参数中。传入同队未结稿约稿的 id，新单插在它前面；省略则追加到队尾；普通新建请留空。"),
 ):
@@ -598,6 +687,8 @@ def create(
         saved = save(db, key, item)
         if insert_before:
             move(db, key, insert_before, item.queue)
+        response.headers.update(version_headers(saved))
+        response.headers["Location"] = f"/api/commissions/{key}"
         return saved
 
 
@@ -607,10 +698,14 @@ def create(
     summary="读取约稿详情",
     response_model=VersionedCommission,
     response_model_exclude_none=True,
+    responses={200: {**json_example(api_examples.DETAIL), "headers": ETAG_HEADER}, 422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}, 404: {"model": ErrorResponse, "description": "约稿不存在"}},
 )
-def detail(key: CommissionKey):
+@documented('版本和重试')
+def detail(key: CommissionKey, response: Response):
     with database() as db:
-        return lookup(db, key)
+        record = lookup(db, key)
+        response.headers.update(version_headers(record))
+        return record
 
 
 @app.put(
@@ -619,22 +714,13 @@ def detail(key: CommissionKey):
     summary="保存编辑后的约稿（与前端编辑窗口相同）",
     response_model=VersionedCommission,
     response_model_exclude_none=True,
-    responses=write_errors(missing=True, images=True, conflict="revision 已过期；重新 GET 并核对改动"),
+    responses={200: {"headers": ETAG_HEADER}, **write_errors(missing=True, images=True, conflict="revision_conflict：重新 GET 并核对改动")},
 )
-def update(key: CommissionKey, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
-    """先 GET 同一路径，修改所需字段，再带上原 revision 提交整份约稿。缺少 payments 或 attachments 会清空对应列表。
-    | PUT 请求中省略的字段 | 保存后的值 |
-    |---|---|
-    | title、is_priority、queue | 沿用原值（随后应用下述延期规则） |
-    | nickname | 自动生成「甲方 + ID 前六位」 |
-    | contact_type | 当前设置的首个联系方式 |
-    | contact、requirements | 空字符串 |
-    | planned、started | 空日期 |
-    | status | 未开始，包括原先进行中或已结稿的单 |
-    | payments、attachments | 空列表 |
-    | revision | 422，必填 |
+@documented('整单编辑的空值规则', '版本和重试', '队列、筛选和顺位')
+def update(key: CommissionKey, response: Response, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
+    """先 GET 同一路径再编辑。
 
-    未知字段会忽略。payments 没有行 ID：修改最新 GET 结果中的目标行，再提交整个数组。
+        未知字段会忽略。payments 没有行 ID：修改最新 GET 结果中的目标行，再提交整个数组。
     服务器直接按提交顺序保存；少传一行会删除该行，多传相同行会重复记账。
     同阶段同金额的行要在最新详情中按完整内容及位置核对；若无法唯一定位，请先确认。
     版本过期返回 409，此时重新读取并核对修改。
@@ -646,7 +732,7 @@ def update(key: CommissionKey, item: Annotated[CommissionUpdate, Body(openapi_ex
     with database(True) as db:
         previous = lookup(db, key)
         if previous["revision"] != item.revision:
-            raise HTTPException(409, "约稿已被其他操作更新，请重新打开编辑窗口后再保存")
+            raise ApiError(409, "revision_conflict", "约稿已被其他操作更新，请重新打开编辑窗口后再保存", revision=previous["revision"])
         if "title" not in item.model_fields_set:
             item.title = previous.get("title", "")
         if "is_priority" not in item.model_fields_set:
@@ -668,6 +754,7 @@ def update(key: CommissionKey, item: Annotated[CommissionUpdate, Body(openapi_ex
             previous["status"] == "已结稿" or original != item.queue
         ):
             move(db, key, None, item.queue)
+        response.headers.update(version_headers(saved))
         return saved
 
 
@@ -687,8 +774,9 @@ def remove(key: CommissionKey):
     tags=["排队"],
     summary="调整排队位置",
     status_code=204,
-    responses=write_errors(missing=True, conflict="当前单已结稿，或 before 目标不存在、已结稿或在其他队列"),
+    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="当前单已结稿，或 before 目标不存在、已结稿或在其他队列")},
 )
+@documented('队列、筛选和顺位')
 def move_job(key: CommissionKey, movement: Annotated[Movement, Body(openapi_examples=api_examples.MOVE)]):
     """路径 key 填要移动的约稿 ID，请求体 before 填目标约稿 ID。两单都须未结稿且在同一队列。
     例如队列为 A、B、C，向 /api/commissions/C的ID/move 发送 {"before":"A的ID"}，结果为 C、A、B。
@@ -696,7 +784,7 @@ def move_job(key: CommissionKey, movement: Annotated[Movement, Body(openapi_exam
     with database(True) as db:
         row = lookup(db, key)
         move(db, key, movement.before, row.get("queue", "normal"))
-    return Response(status_code=204)
+        return no_content(db, key)
 
 
 class StatusChange(BaseModel):
@@ -704,7 +792,7 @@ class StatusChange(BaseModel):
 
 
 @app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿", status_code=204,
-    responses=write_errors(missing=True, conflict="当前状态不允许此次迁移，见下表"),
+    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="当前状态不允许此次迁移，见下表")},
 )
 def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(openapi_examples=api_examples.STATUS)]):
     """| 当前状态 | 请求进行中 | 请求已结稿 |
@@ -713,18 +801,20 @@ def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(opena
     | 进行中 | 204 保持 | 204 结稿 |
     | 已结稿 | 409 | 204 保持 |
 
-    请求未开始返回 422。此接口仅改 status，started 由编辑者填写。结稿后保留 queue 字段，仍可追加稿费。
+    未开始不在此请求枚举内，参数校验返回 422。此接口仅改 status，started 由编辑者填写。结稿后保留 queue 字段，仍可追加稿费。
     """
     with database(True) as db:
         current = lookup(db, key)["status"]
         expected = "未开始" if change.status == "进行中" else "进行中"
         if current not in (expected, change.status):
-            raise HTTPException(409, "约稿状态已变化，请刷新")
+            raise ApiError(409, "invalid_transition", "约稿状态已变化，请刷新")
+        if current == change.status:
+            return no_content(db, key)
         db.execute(
             "UPDATE jobs SET body=json_set(body,'$.status',?) WHERE id=?",
             (change.status, key),
         )
-    return Response(status_code=204)
+        return no_content(db, key)
 
 
 @app.post(
@@ -732,12 +822,13 @@ def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(opena
     tags=["排队"],
     summary="移入延期等待队尾",
     status_code=204,
-    responses=write_errors(missing=True, conflict="已结稿约稿不能延期"),
+    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="已结稿约稿不能延期")},
 )
+@documented('队列、筛选和顺位')
 def defer_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "deferred")
-    return Response(status_code=204)
+        return no_content(db, key)
 
 
 @app.post(
@@ -745,12 +836,13 @@ def defer_job(key: CommissionKey):
     tags=["排队"],
     summary="恢复至正常队尾",
     status_code=204,
-    responses=write_errors(missing=True, conflict="已结稿约稿不能恢复排队"),
+    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="已结稿约稿不能恢复排队")},
 )
+@documented('队列、筛选和顺位')
 def resume_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "normal")
-    return Response(status_code=204)
+        return no_content(db, key)
 
 
 @app.post(
@@ -759,14 +851,17 @@ def resume_job(key: CommissionKey):
     summary="追加一笔收款或无日期的付款约定",
     response_model=VersionedCommission,
     response_model_exclude_none=True,
-    responses=write_errors(missing=True, conflict="本单已用此幂等键提交其他内容"),
+    responses={200: {"headers": {**ETAG_HEADER, "Idempotent-Replayed": header_spec("首次写入 false；已处理的同内容重试 true")}},
+               **write_errors(missing=True, conflict="idempotency_key_conflict：本单已用此键提交其他内容")},
 )
+@documented('幂等摘要', '版本和重试')
 def pay(
+    response: Response,
     key: CommissionKey,
     payment: Annotated[Payment, Body(openapi_examples=api_examples.PAYMENT)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ):
-    """键按约稿 ID 独立，限 1–128 个可打印 ASCII 字符（排除空格）。同键同体重试返回当前约稿和 200，无重放标识；同键不同体返回 409。已结稿约稿也可追加。"""
+    """键按约稿 ID 独立，限 1–128 个可打印 ASCII 字符（排除空格）。同键同体重试返回当前约稿和 200，Idempotent-Replayed 为 true；同键不同体返回 409。已结稿约稿也可追加。"""
     with database(True) as db:
         previous = lookup(db, key)
         # Omitted date/platform defaults may change between attempts.
@@ -777,12 +872,17 @@ def pay(
                             (key, idempotency_key)).fetchone()
         if replay:
             if replay["digest"] != digest:
-                raise HTTPException(409, "幂等键已用于其他收款内容")
+                raise ApiError(409, "idempotency_key_conflict", "幂等键已用于其他收款内容")
+            response.headers.update(version_headers(previous))
+            response.headers["Idempotent-Replayed"] = "true"
             return previous
         db.execute("INSERT INTO payment_requests VALUES(?,?,?)", (key, idempotency_key, digest))
         item = Commission.model_validate(previous)
         item.payments.append(payment)
-        return save(db, key, item, sample=previous.get("sample", False))
+        saved = save(db, key, item, sample=previous.get("sample", False))
+        response.headers.update(version_headers(saved))
+        response.headers["Idempotent-Replayed"] = "false"
+        return saved
 
 
 @app.get(
@@ -790,19 +890,20 @@ def pay(
     tags=["附件"],
     summary="获取原图或最多 240 像素的缩略图",
     response_class=Response,
-    responses={
-        404: {"model": ErrorMessage, "description": "附件 ID 不存在"},
+    responses={422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"},
+        404: {"model": ErrorResponse, "description": "附件 ID 不存在"},
         200: {
             "content": {
-                "image/png": {},
-                "image/jpeg": {},
-                "image/webp": {},
-                "image/gif": {},
+                "image/png": {"schema": {"type": "string", "format": "binary"}},
+                "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                "image/webp": {"schema": {"type": "string", "format": "binary"}},
+                "image/gif": {"schema": {"type": "string", "format": "binary"}},
             }
         }
     },
 )
-def image(key: Annotated[str, PathParam(description="参考图的附件 ID，取自约稿详情 attachments[].id")], thumbnail: bool = False):
+@documented('附件与备份边界')
+def image(key: Annotated[str, PathParam(description="参考图的附件 ID，取自约稿详情 attachments[].id")], thumbnail: bool = Query(False, description="省略或 false 返回原图；true 返回等比、不放大的 PNG，长边最多 240px，大小可能超过原图")):
     with database() as db:
         if thumbnail:
             row = db.execute(
@@ -812,7 +913,7 @@ def image(key: Annotated[str, PathParam(description="参考图的附件 ID，取
                 return Response(row["thumbnail"], media_type="image/png")
         row = db.execute("SELECT mime,bytes FROM images WHERE id=?", (key,)).fetchone()
         if not row:
-            raise HTTPException(404, "图片不存在")
+            raise ApiError(404, "image_not_found", "图片不存在")
         if thumbnail:
             return Response(thumbnail_bytes(row["bytes"]), media_type="image/png")
         return Response(
@@ -858,6 +959,8 @@ class Client(BaseModel):
     tags=["约稿"],
     summary="历史甲方联想，支持中文、拼音和首字母混输",
     response_model=list[Client],
+    responses={200: json_example([{k: api_examples.DETAIL[k] for k in ("nickname", "contact_type", "contact")}]),
+               422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
 )
 def suggest(q: str = Query("", openapi_examples={"nickname": api_examples.example("按昵称搜索", "小林"),
                                                 "initials": api_examples.example("按拼音首字母搜索", "xl")}),
@@ -884,6 +987,7 @@ def suggest(q: str = Query("", openapi_examples={"nickname": api_examples.exampl
     "/api/settings",
     tags=["设置"],
     summary="读取联系方式和支付平台",
+    responses={200: json_example(api_examples.OPTIONS)},
     response_model=Settings,
 )
 def settings():
@@ -910,7 +1014,8 @@ class PeriodIncome(BaseModel):
 
 
 class Statistics(BaseModel):
-    periods: dict[int, PeriodIncome] = Field(description="3、6、12 个自然月的收入与月均，含本月，零收入月参与平均")
+    """含示例数据。统计使用 JSON 数字；月均用十进制取最近的分，平分时取偶。"""
+    periods: dict[str, PeriodIncome] = Field(json_schema_extra={"required": ["3", "6", "12"], "propertyNames": {"enum": ["3", "6", "12"]}}, description="3、6、12 个自然月的收入与月均，含本月，零收入月参与平均")
 
     count: int = Field(description="正常排队且未结稿的约稿数")
     deferred_count: int = Field(description="延期等待队列中尚未结稿的约稿数量")
@@ -919,7 +1024,7 @@ class Statistics(BaseModel):
     average: float = Field(description="累计实收除以首笔实收月至本月的自然月数，含零收入月")
     current: float = Field(description="上海本月截至今天的实收")
     years: list[int] = Field(description="有实收的年份，降序")
-    monthly: dict[str, float] = Field(description="按 YYYY-MM 汇总，零收入月份补零；year 优先于 all_time 再优先于 months，仅影响本字段")
+    monthly: dict[str, float] = Field(json_schema_extra={"propertyNames": {"pattern": r"^[0-9]{4}-(0[1-9]|1[0-2])$"}}, description="按 YYYY-MM 汇总，零收入月份补零；year 优先于 all_time 再优先于 months，仅影响本字段")
     platforms: dict[str, float] = Field(description="各支付平台累计实收，单位元")
 
 
@@ -928,11 +1033,14 @@ class Statistics(BaseModel):
     tags=["统计"],
     summary="队列与收入统计，按支付日期归集",
     response_model=Statistics,
+    responses={200: json_example(api_examples.STATS),
+               422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
 )
+@documented('收入统计与甲方历史')
 def stats(
-    months: int = Query(6, ge=1, le=120),
-    all_time: bool = Query(False, description="从首笔实收所在月起显示至本月"),
-    year: int | None = Query(None, ge=1, le=9999, description="选择自然年查看历史收入"),
+    months: int = Query(6, ge=1, le=120, description="仅改变 monthly，含上海本月"),
+    all_time: bool = Query(False, description="仅改变 monthly，从首笔实收所在月至本月"),
+    year: int | None = Query(None, ge=1, le=9999, description="仅改变 monthly，以自然年覆盖 months 和 all_time"),
 ):
     """所有金额以元计，统计至上海今天，示例数据参与合计。月份筛选只改变 monthly，优先级为 year、all_time、months。历史年显示全年，本年截至本月，未来年为空。"""
     with database() as db:
@@ -966,7 +1074,7 @@ def income_stats(records, months, all_time, year):
     periods = {}
     for length in (3, 6, 12):
         subtotal = sum((totals.get(m, 0) for m in range(current - length + 1, current + 1)), Decimal(0))
-        periods[length] = {"total": subtotal, "average": round(subtotal / length, 2)}
+        periods[str(length)] = {"total": subtotal, "average": round(subtotal / length, 2)}
     return {
         "periods": periods,
         "count": len(active),
@@ -983,20 +1091,49 @@ def income_stats(records, months, all_time, year):
     }
 
 
-class Workspace(BaseModel):
+class WorkspacePage(BaseModel):
     page: Literal["overview", "queue", "receipts", "settings"]
     settings: Settings
     count: int = Field(description="所有页面均为正常队列未结稿数")
     has_samples: bool = Field(description="库中是否含示例约稿")
-    records: list[Card | VersionedCommission] = Field(default_factory=list, description="按 page 判别：queue 为全部 Card；overview 为两队各前四个 VersionedCommission；其他页为空")
-    receipts: list[Receipt] = Field(default_factory=list, description="仅 receipts 页为全量有日期的稿费，其他页为空")
-    stats: Statistics | None = Field(None, description="仅 overview 页返回收入与排期统计")
+    records: list = Field(max_length=0, description="此页无约稿列表，恒为 []")
+    receipts: list[Receipt] = Field(max_length=0, description="此页无收款列表，恒为 []")
+
+
+class OverviewStatistics(Statistics):
+    until: date | None = Field(None, description="正常活动单的最晚预计开始日，无日期时省略")
+
+
+class OverviewPage(WorkspacePage):
+    page: Literal["overview"]
+    records: list[VersionedCommission] = Field(description="普通前四单，再接延期前四单")
+    stats: OverviewStatistics
+
+
+class QueuePage(WorkspacePage):
+    page: Literal["queue"]
+    records: list[Card] = Field(description="全部队列及已结稿历史")
+
+
+class ReceiptsPage(WorkspacePage):
+    page: Literal["receipts"]
+    receipts: list[Receipt]
+
+
+class SettingsPage(WorkspacePage):
+    page: Literal["settings"]
+
+
+Workspace = Annotated[OverviewPage | QueuePage | ReceiptsPage | SettingsPage, Field(discriminator="page")]
 
 
 @app.get("/api/workspace", tags=["工作台"], summary="单次读取事务中的当前页面快照",
-         response_model=Workspace, response_model_exclude_none=True)
+         response_model=Workspace, response_model_exclude_none=True,
+    responses={200: json_example(api_examples.WORKSPACE),
+               422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
+)
 def workspace(page: Literal["overview", "queue", "receipts", "settings"],
-              months: int = Query(6, ge=1, le=120), all_time: bool = False,
+              months: int = Query(6, ge=1, le=120, description="仅改变 monthly，含上海本月"), all_time: bool = False,
               year: int | None = Query(None, ge=1, le=9999)):
     """按 page 选择响应结构。所有页都返回 settings、count、has_samples。
 
@@ -1009,7 +1146,7 @@ def workspace(page: Literal["overview", "queue", "receipts", "settings"],
 
     非 receipts 页的 receipts 为空；非 overview 页省略 stats。"""
     with database() as db:
-        result = {"page": page, "settings": options(db)}
+        result = {"page": page, "settings": options(db), "records": [], "receipts": []}
         if page == "settings":
             result["count"] = len(active_keys(db, "normal"))
             result["has_samples"] = bool(db.execute(
@@ -1033,8 +1170,11 @@ def workspace(page: Literal["overview", "queue", "receipts", "settings"],
     tags=["数据"],
     summary="导出完整 JSON 备份（含图片）",
     response_model=Snapshot,
+    responses={200: {**json_example({"version": 1, "settings": api_examples.OPTIONS, "commissions": []}),
+                     "headers": {"Content-Disposition": header_spec("attachment，文件名 commission-YYYY-MM-DD.json")}}},
     response_model_exclude_none=True,
 )
+@documented('备份、示例与删除')
 def export_data():
     def stream():
         with database(streaming=True) as db:
@@ -1089,7 +1229,9 @@ def download_text(content, extension, media_type):
 
 
 @app.get("/api/export/csv", tags=["数据"], summary="下载约稿与收款 CSV，每笔收款一行，无收款约稿也保留一行",
-         response_class=Response, responses={200: {"content": {"text/csv": {}}}})
+         response_class=Response, responses={200: {"headers": {"Content-Disposition": header_spec("commission-YYYY-MM-DD.csv")},
+             "content": {"text/csv; charset=utf-8": {"schema": {"type": "string"}}}}})
+@documented('金额和财务导出')
 def export_csv():
     with database() as db:
         records = rows(db)
@@ -1114,7 +1256,8 @@ def ledger_string(value):
 
 
 @app.get("/api/export/beancount", tags=["数据"], summary="下载 CNY 双重记账账本，每笔收款对应一笔交易",
-         response_class=PlainTextResponse)
+         response_class=PlainTextResponse, responses={200: {"headers": {"Content-Disposition": header_spec("commission-YYYY-MM-DD.beancount")}}})
+@documented('金额和财务导出')
 def export_beancount():
     entries = sorted(receipts(), key=lambda entry: entry["date"])
     first = entries[0]["date"] if entries else today().isoformat()
@@ -1138,6 +1281,7 @@ def export_beancount():
     status_code=204,
     responses=write_errors(images=True),
 )
+@documented('附件与备份边界', '幂等摘要')
 def import_data(snapshot: Annotated[Snapshot, Body(openapi_examples=api_examples.IMPORT)]):
     """先用 GET /api/export 保存当前快照。无预演模式。导入在单个事务中替换设置、全部约稿、收款、图片及幂等记录。
     备份内约稿 id 必填且唯一（1–80 位字母、数字、下划线或短横线）。与现库 ID 相同也按备份重建；
@@ -1146,7 +1290,7 @@ def import_data(snapshot: Annotated[Snapshot, Body(openapi_examples=api_examples
     if len(ids) != len(set(ids)) or any(
         not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", i) for i in ids
     ):
-        raise HTTPException(422, "备份中的约稿 ID 无效或重复")
+        raise ApiError(422, "invalid_backup_id", "备份中的约稿 ID 无效或重复")
     with database(True) as db:
         db.execute("DELETE FROM jobs")
         db.execute(
@@ -1156,7 +1300,7 @@ def import_data(snapshot: Annotated[Snapshot, Body(openapi_examples=api_examples
         for item in snapshot.commissions:
             save(db, item.id, item, restore=True, sample=item.sample)
             if len({r.token for r in item.payment_requests}) != len(item.payment_requests):
-                raise HTTPException(422, "备份包含重复的收款幂等键")
+                raise ApiError(422, "duplicate_payment_key", "备份包含重复的收款幂等键")
             db.executemany("INSERT INTO payment_requests VALUES(?,?,?)",
                            ((item.id, r.token, r.digest) for r in item.payment_requests))
     return Response(status_code=204)
@@ -1191,7 +1335,7 @@ def load_examples(db):
     tags=["数据"],
     summary="添加示例约稿和收款，有示例时保持现状",
     status_code=204,
-    responses=write_errors(),
+    responses=write_errors(validation=False),
 )
 def add_examples():
     with database(True) as db:
@@ -1204,7 +1348,7 @@ def add_examples():
     tags=["数据"],
     summary="仅清除标有示例的约稿及其收款",
     status_code=204,
-    responses=write_errors(),
+    responses=write_errors(validation=False),
 )
 def remove_examples():
     with database(True) as db:

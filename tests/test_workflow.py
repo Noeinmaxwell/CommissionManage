@@ -4,6 +4,7 @@ import asyncio
 import base64
 import csv
 import json
+import hashlib
 import os
 import socket
 import sqlite3
@@ -83,6 +84,77 @@ class WorkflowTest(unittest.TestCase):
             "POST",
             {"version": 1, "settings": Settings().model_dump(), "commissions": []},
         )
+
+    def test_swagger_edit_examples_preserve_other_fields(self):
+        with urlopen(self.base.removesuffix("/api") + "/openapi.json") as response:
+            spec = json.load(response)
+        put = spec["paths"]["/api/commissions/{key}"]["put"]
+        examples = put["requestBody"]["content"]["application/json"]["examples"]
+        fields = set(spec["components"]["schemas"]["CommissionUpdate"]["properties"])
+        changed = {"settle": "payments", "mark": "is_priority", "attachment": "requirements"}
+        stream = BytesIO()
+        Image.new("RGB", (2, 2)).save(stream, format="PNG")
+        data = base64.b64encode(stream.getvalue()).decode()
+        for name, example in examples.items():
+            with self.subTest(example=name):
+                body = dict(example["value"])
+                self.assertEqual(set(body), fields)
+                fixture = dict(examples["mark"]["value"], is_priority=False)
+                fixture.pop("revision")
+                fixture["attachments"] = [{"name": "角色参考图", "data": data}]
+                saved = self.api("/commissions", "POST", fixture)
+                body.update(revision=saved["revision"])
+                body["attachments"] = [{**ref, "id": saved["attachments"][i]["id"]}
+                                       for i, ref in enumerate(body["attachments"])]
+                result = self.api("/commissions/" + saved["id"], "PUT", body)
+                for key in fields - {changed[name], "revision"}:
+                    self.assertEqual(result[key], saved[key], key)
+                self.assertNotEqual(result[changed[name]], saved[changed[name]])
+                self.assertEqual(self.api("/images/" + saved["attachments"][0]["id"]), stream.getvalue())
+
+    def test_revision_headers_replay_and_typed_errors(self):
+        def request(path, method, body=None, headers=None):
+            data = json.dumps(body).encode() if body is not None else None
+            with urlopen(Request(self.base + path, data, {"Content-Type": "application/json", **(headers or {})},
+                                 method=method)) as response:
+                raw = response.read()
+                return response.headers, json.loads(raw) if raw else None
+
+        headers, saved = request("/commissions", "POST", {})
+        path = "/commissions/" + saved["id"]
+        self.assertEqual(headers["Location"], "/api" + path)
+        old = headers["ETag"]
+        self.assertEqual(old, '"' + saved["revision"] + '"')
+        self.assertEqual(request(path + "/move", "POST", {})[0]["ETag"], old)
+        for suffix, method, body in [("/defer", "POST", None), ("/resume", "POST", None),
+                                     ("/status", "PATCH", {"status": "进行中"})]:
+            fresh = request(path + suffix, method, body)[0]["ETag"]
+            self.assertNotEqual(old, fresh)
+            self.assertEqual(request(path + suffix, method, body)[0]["ETag"], fresh)
+            old = fresh
+        with self.assertRaises(HTTPError) as error:
+            request(path, "PUT", saved)
+        conflict = json.load(error.exception)
+        self.assertEqual(conflict["code"], "revision_conflict")
+        self.assertEqual(conflict["current_revision"], old.strip('"'))
+        token = {"Idempotency-Key": "test-token"}
+        headers, paid = request(path + "/payments", "POST", {"amount": "200.00"}, token)
+        self.assertEqual(headers["Idempotent-Replayed"], "false")
+        self.assertNotEqual(headers["ETag"], old)
+        self.assertEqual(self.api("/export")["commissions"][0]["payment_requests"][0]["digest"],
+                         hashlib.sha256(b'{"amount": "2E+2"}').hexdigest())
+        _, edited = request(path, "PUT", {**paid, "payments": []})
+        headers, replay = request(path + "/payments", "POST", {"amount": 200}, token)
+        self.assertEqual(headers["Idempotent-Replayed"], "true")
+        self.assertEqual(replay, edited)
+        with self.assertRaises(HTTPError) as error:
+            request("/settings", "DELETE")
+        self.assertEqual(set(error.exception.headers["Allow"].split(", ")), {"GET", "PUT"})
+        with self.assertRaises(HTTPError) as error:
+            request("/commissions/missing/payments", "POST", {"amount": 1})
+        invalid = json.load(error.exception)
+        self.assertEqual(invalid["code"], "validation_error")
+        self.assertEqual(invalid["detail"][0]["loc"], ["header", "Idempotency-Key"])
 
     def test_queue_and_mixed_search(self):
         path = "/commissions"
