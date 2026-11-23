@@ -229,7 +229,39 @@ function queueList() {
     .map((r, index) => {
       const i = list.indexOf(r),
         drag = !archived && !q;
-      return `<article class="queue-card" data-key="${r.id}">${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}<span class="pos">${String(i + 1).padStart(2, "0")}</span><span class="avatar">${esc(Array.from(r.nickname)[0])}</span><div class="queue-body"><div class="queue-title"><button class="namebtn" data-action="edit">${esc(r.nickname)}</button>${statusTag(r.status)}${sampleTag(r)}</div><div class="queue-meta"><span>${r.contact ? esc(r.contact_type) + " · " + esc(r.contact) : "未填写联系方式"}</span><span class="${r.brief_received ? "received" : ""}">${r.brief_received ? "已交需求" : "待交需求"}</span><span>预计 ${esc(r.planned || "待定")}</span></div><div class="client-history"><span>已完成 <b>${r.history.completed}</b> 单</span><span>累计 <b>¥${money(r.history.total)}</b></span><span>最近收款 <b>${esc(r.history.latest || "—")}</b></span></div>${briefDetails(r)}</div><div class="queue-actions">${archived ? "" : state.lane === "deferred" ? `<button class="btn" data-action="resume">${icon("arrow")}恢复排队</button>` : `<button class="btn" data-action="defer">${icon("down")}延期</button>`}<button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button></div></article>${drag && index < matches.length - 1 ? `<div class="insert"><button data-action="insert" data-before="${list[i + 1].id}" aria-label="在此插入新约稿">＋ 插队</button></div>` : '<div class="list-end"></div>'}`;
+      const contact = r.contact
+        ? `${esc(r.contact_type)} · ${esc(r.contact)}`
+        : "未填写联系方式";
+      return `<article class="queue-card" data-key="${r.id}">
+        <div class="queue-rank">
+          ${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
+          <span class="pos">${String(i + 1).padStart(2, "0")}</span>
+          <span class="avatar">${esc(Array.from(r.nickname)[0])}</span>
+        </div>
+        <div class="queue-client">
+          <div class="queue-title">
+            <button class="namebtn" data-action="edit">${esc(r.nickname)}</button>
+            <span class="queue-labels">${statusTag(r.status)}${sampleTag(r)}</span>
+          </div>
+          <div class="queue-contact">${contact}</div>
+        </div>
+        <div class="queue-summary">
+          <div class="queue-meta">
+            <span>预计 ${esc(r.planned || "待定")}</span>
+            <span class="${r.brief_received ? "received" : ""}">${r.brief_received ? "已交需求" : "待交需求"}</span>
+          </div>
+          <div class="client-history">
+            <span>已完成 <b>${r.history.completed}</b> 单</span>
+            <span>累计 <b>¥${money(r.history.total)}</b></span>
+            <span>最近收款 <b>${esc(r.history.latest || "—")}</b></span>
+          </div>
+        </div>
+        <div class="queue-actions">
+          ${archived ? "" : state.lane === "deferred" ? `<button class="btn" data-action="resume">${icon("arrow")}恢复排队</button>` : `<button class="btn" data-action="defer">${icon("down")}延期</button>`}
+          <button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button>
+        </div>
+        ${briefDetails(r)}
+      </article>${drag && index < matches.length - 1 ? `<div class="insert"><button data-action="insert" data-before="${list[i + 1].id}" aria-label="在此插入新约稿">＋ 插队</button></div>` : '<div class="list-end"></div>'}`;
     })
     .join("");
 }
