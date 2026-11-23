@@ -8,7 +8,7 @@ def example(summary, value, description=None):
     return result
 
 
-AGREEMENT = {"stage": "尾款", "amount": "600.00", "date": None}
+AGREEMENT = {"stage": "尾款", "amount": "600.00", "date": ""}
 DEPOSIT = {"stage": "定金", "amount": "200.00", "date": "2026-02-28", "platform": "微信"}
 OPTIONS = {"contacts": ["QQ", "微信"], "platforms": ["微信", "支付宝"]}
 ORDER = {"nickname": "小林", "title": "角色头像", "requirements": "蓝色背景",
@@ -33,7 +33,7 @@ PAYMENT = {
     "today": example("按上海当天日期收款", {"amount": "180.00", "stage": "稿费"}),
 }
 MOVE = {"before": example("移到同队另一单之前", {"before": "替换为目标约稿ID"}),
-        "end": example("移到队尾", {"before": None})}
+        "end": example("移到队尾", {}, "省略 before 或显式传入 null 都表示队尾。")}
 STATUS = {"start": example("未开始转为进行中", {"status": "进行中"}),
           "finish": example("进行中转为已结稿", {"status": "已结稿"})}
 SETTINGS = {"options": example("设置联系方式与收款平台", OPTIONS, "完整替换两个列表，首项是默认值。")}
