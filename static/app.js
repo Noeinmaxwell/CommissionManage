@@ -264,7 +264,7 @@ function queuePreview(lane) {
     const nickname = `<button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(record.nickname)}</button>`;
     return `<tr data-action="detail" data-key="${esc(record.id)}">
       ${deferred ? "" : `<td>${String(index + 1).padStart(2, "0")}</td>`}
-      <td>${nickname}${deferred ? "" : commissionTags(record)}</td><td>${esc(record.title || "—")}</td>
+      <td><div class="preview-client">${nickname}${deferred ? "" : commissionTags(record)}</div></td><td>${esc(record.title || "—")}</td>
       ${deferred ? "" : `<td class="preview-date">${esc(record.planned || "待定")}</td><td>${statusTag(record.status)}</td>`}</tr>`;
   }).join("");
   return `<section class="card preview-${lane}"><div class="card-head"><h2>${icon(deferred ? "calendar" : "queue")}${heading}</h2>
@@ -544,7 +544,7 @@ function openEditor(key = null, before = null) {
  <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label>${key ? `<label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority ? "checked" : ""}>插队</label>` : ""}</div></section>
  <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
- <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="iconbtn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
+ <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="btn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
   (r.payments || []).forEach((p) => $("#payments").append(paymentRow(p)));
   drawThumbs();
   $("#editor").showModal();

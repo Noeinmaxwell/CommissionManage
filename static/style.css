@@ -1080,6 +1080,7 @@ textarea {
   background: #fbfcfe;
 }
 .dialog-foot .danger {
+  white-space: nowrap;
   margin-right: auto;
   color: #b5484e;
 }
@@ -1483,10 +1484,7 @@ main > * {
     margin-top: 18px;
   }
   .art {
-    transform: scale(0.85) rotate(-9deg);
-    right: 7%;
-    top: 17%;
-    transform-origin: center;
+    display: none;
   }
   .metric-stack {
     grid-template-columns: 1fr 1fr;
@@ -1570,10 +1568,6 @@ main > * {
 @media (max-width: 380px) {
   .sidebar nav .icon {
     display: none;
-  }
-  .art {
-    right: 0;
-    transform: scale(0.68) rotate(-9deg);
   }
   .metric {
     gap: 7px;
@@ -1808,6 +1802,12 @@ button.metric:hover { border-color: #b7caef; }
   gap: 18px;
 }
 .preview-scroll { overflow-x: auto; }
+.preview-client {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+}
 .queue-previews th, .preview-date { white-space: nowrap; }
 .queue-previews td, .queue-previews .namebtn { overflow-wrap: anywhere; }
 .preview-deferred .compact-table td:first-child { width: 43%; }
