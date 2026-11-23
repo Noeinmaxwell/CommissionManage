@@ -4,3 +4,4 @@ pypinyin>=0.53,<1
 Pillow>=10.4,<14
 swagger-ui-py==25.7.1
 pydantic>=2.7,<3
+tzdata; sys_platform == "win32"

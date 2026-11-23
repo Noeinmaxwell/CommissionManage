@@ -662,6 +662,7 @@ class Statistics(BaseModel):
 )
 def stats(
     months: int = Query(6, ge=1, le=120),
+    all_time: bool = Query(False, description="从首笔实收所在月起显示至本月"),
     year: int | None = Query(None, ge=1, le=9999, description="选择自然年查看历史收入"),
 ):
     now = today()
@@ -685,6 +686,8 @@ def stats(
     span = current - min(totals, default=current) + 1
     years = sorted({m // 12 for m in totals}, reverse=True)
     first = year * 12 if year else current - months + 1
+    if all_time and year is None:
+        first = min(totals, default=current)
     last = min(first + 11, current) if year else current
     return {
         "count": len(active),

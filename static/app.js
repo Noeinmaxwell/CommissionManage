@@ -132,7 +132,7 @@ async function refresh() {
     api(
       state.year
         ? `/stats?year=${state.year}`
-        : `/stats?months=${state.months}`,
+        : state.months === "all" ? "/stats?all_time=true" : `/stats?months=${state.months}`,
     ),
   ]);
   if (id !== loadId) return;
@@ -156,11 +156,11 @@ function metric(label, n, ico, teal = false) {
 }
 function monthlyChart(values) {
   const entries = Object.entries(values),
-    max = Math.max(100, ...Object.values(values));
+    max = entries.reduce((peak, [, value]) => Math.max(peak, value), 100);
   const unit = 10 ** Math.floor(Math.log10(max)),
     top = Math.ceil(max / unit) * unit;
   const left = 49,
-    right = 512,
+    right = Math.max(512, left + 28 * entries.length),
     bottom = 145,
     w = (right - left) / entries.length;
   let html = "";
@@ -174,9 +174,12 @@ function monthlyChart(values) {
       h = (n / top) * 128,
       bw = Math.min(35, w * 0.56),
       current = i === entries.length - 1;
-    html += `<g><title>${key} · ¥${money(n)}</title><rect class="bar ${current ? "current" : ""}" x="${x - bw / 2}" y="${bottom - Math.max(h, 1.5)}" width="${bw}" height="${Math.max(h, 1.5)}" rx="3"/><text x="${x}" y="166" text-anchor="middle">${Number(key.slice(5))}月</text></g>`;
+    const label = entries.length > 12
+      ? (i % 3 === 0 ? key : "")
+      : Number(key.slice(5)) + "月";
+    html += `<g data-tip="${key} · 收入 ¥${money(n)}"><rect x="${x - w / 2}" y="12" width="${w}" height="155" fill="transparent"/><rect class="bar ${current ? "current" : ""}" x="${x - bw / 2}" y="${bottom - Math.max(h, 1.5)}" width="${bw}" height="${Math.max(h, 1.5)}" rx="3"/><text x="${x}" y="166" text-anchor="middle">${label}</text></g>`;
   });
-  return `<svg class="plot" viewBox="0 0 520 175" role="img" aria-label="月收入柱状图">${html}</svg><details class="chart-data"><summary>查看月收入明细</summary>${entries.map(([m, n]) => `<div><span>${m}</span><b>¥${money(n)}</b></div>`).join("")}</details>`;
+  return `<div class="plot-scroll"><svg class="plot" style="min-width:${right > 512 ? right + 8 : 0}px" viewBox="0 0 ${right + 8} 175" role="img" aria-label="月收入柱状图">${html}</svg></div><details class="chart-data"><summary>查看月收入明细</summary>${entries.map(([m, n]) => `<div><span>${m}</span><b>¥${money(n)}</b></div>`).join("")}</details>`;
 }
 const colors = [
   "#5480de",
@@ -191,16 +194,48 @@ function platforms() {
     names = [
       ...new Set([...Object.keys(platforms), ...state.settings.platforms]),
     ];
-  let used = 0;
-  const gradient = names
-    .map((n, i) => {
-      const start = used;
-      used += total ? ((platforms[n] || 0) / total) * 100 : 0;
-      return `${colors[i % colors.length]} ${start}% ${used}%`;
-    })
-    .join(",");
-  return `<div class="donut-content"><div class="donut" ${total ? `style="background:conic-gradient(${gradient})"` : ""}><div class="donut-inner"><strong>${Object.keys(platforms).length}</strong><small>收入平台</small></div></div><div class="legend">${names.map((n, i) => `<div title="¥${money(platforms[n] || 0)}"><i style="background:${colors[i % colors.length]}"></i><span>${esc(n)}<small>¥${money(Object.hasOwn(platforms, n) ? platforms[n] : 0)}</small></span><b>${total ? +(((platforms[n] || 0) * 100) / total).toFixed(1) : 0}%</b></div>`).join("")}</div></div>`;
+  let end = 0;
+  const segments = names.map((name, i) => {
+    const amount = Object.hasOwn(platforms, name) ? platforms[name] : 0;
+    const share = total ? 100 * amount / total : 0;
+    const start = end;
+    end += share;
+    const percent = +share.toFixed(1) + "%";
+    return {
+      name, amount, start, end, percent, color: colors[i % colors.length],
+      tip: `${name} · ¥${money(amount)} · 占比 ${percent}`,
+    };
+  });
+  const gradient = segments.map(s => `${s.color} ${s.start}% ${s.end}%`).join(",");
+  return `<div class="donut-content"><div class="donut" ${total ? `style="background:conic-gradient(${gradient})"` : ""}><div class="donut-inner"><strong>${Object.keys(platforms).length}</strong><small>收入平台</small></div></div><div class="legend">${segments.map(s => `<div data-tip="${esc(s.tip)}" data-end="${s.end}"><i style="background:${s.color}"></i><span>${esc(s.name)}<small>¥${money(s.amount)}</small></span><b>${s.percent}</b></div>`).join("")}</div></div>`;
 }
+
+function hideChartTip() {
+  $("#chartTip").hidden = true;
+}
+document.addEventListener("pointermove", event => {
+  let item = event.target.closest("[data-tip]");
+  if (event.target.matches(".donut") && state.stats.total > 0) {
+    const ring = event.target;
+    const rect = ring.getBoundingClientRect();
+    const dx = event.clientX - rect.left - rect.width / 2;
+    const dy = event.clientY - rect.top - rect.height / 2;
+    const fraction = (Math.atan2(dx, -dy) / (2 * Math.PI) + 1) % 1;
+    item = Array.from(ring.parentNode.querySelectorAll("[data-end]"))
+      .find(row => fraction * 100 < Number(row.dataset.end));
+  }
+  if (!item || event.pointerType === "touch") return hideChartTip();
+  const tip = $("#chartTip");
+  tip.textContent = item.dataset.tip;
+  tip.hidden = false;
+  tip.style.left = Math.max(4, Math.min(event.clientX + 12, innerWidth - tip.offsetWidth - 6)) + "px";
+  tip.style.top = (event.clientY + 14 + tip.offsetHeight < innerHeight
+    ? event.clientY + 14 : Math.max(4, event.clientY - tip.offsetHeight - 8)) + "px";
+});
+document.addEventListener("pointerout", e => { if (!e.relatedTarget) hideChartTip(); });
+document.addEventListener("scroll", hideChartTip, true);
+window.addEventListener("blur", hideChartTip);
+
 function empty(text, create = false) {
   return `<div class="empty"><span class="tile">${icon("queue")}</span><strong>${text}</strong>${create ? button("新建约稿", "new", "plus") : ""}</div>`;
 }
@@ -210,8 +245,8 @@ function overview() {
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
     `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("过去总收入", s.total, "wallet")}${metric("每月平均收入", s.average, "trend", true)}</div></div>
- <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
- <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="edit">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
+ <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}<option value="all" ${!state.year && state.months === "all" ? "selected" : ""}>全部时间</option>${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
+ <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-action="detail" data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
   );
 }
 function briefDetails(record) {
@@ -289,6 +324,28 @@ function queue() {
     `<div class="toolbar"><div class="tabs">${queueTabs()}</div><div class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称、账号或约稿" aria-label="搜索昵称、账号或约稿"><button class="search-eye" data-action="search-mode" aria-label="显示未匹配项" aria-pressed="${state.showUnmatched}" title="${state.showUnmatched ? "当前显示全部，点击隐藏未匹配项" : "当前隐藏未匹配项，点击显示全部"}">${icon(state.showUnmatched ? "eye" : "eyeOff")}</button></div></div><div id="queueList">${queueList()}</div>`
   );
 }
+function openCommissionDetail(key) {
+  const r = state.records.find(record => record.id === key);
+  if (!r) throw Error("约稿已更新，请刷新后查看");
+  const dialog = $("#commissionDetail");
+  const fields = [
+    ["联系方式", [r.contact_type, r.contact].filter(Boolean).join(" · ")],
+    ["队列", r.status === "已结稿" ? "已结稿" : queueNames[r.queue]],
+    ["预计开始", r.planned], ["实际开始", r.started],
+    ["需求状态", r.brief_received ? "已交需求" : "待交需求"],
+  ];
+  dialog.dataset.key = key;
+  dialog.innerHTML = `<div class="dialog-head"><h2 id="detailTitle">约稿详情</h2><button class="iconbtn" data-dismiss="commissionDetail" aria-label="关闭">${icon("x")}</button></div>
+    <div class="dialog-scroll"><section><h3>${esc(r.nickname)} ${statusTag(r.status)}</h3>
+    <dl class="detail-fields">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value || "—")}</dd></div>`).join("")}</dl></section>
+    <section><h3>${esc(r.title || "约稿需求")}</h3><p class="detail-brief">${esc(r.requirements || "暂无详细需求")}</p>
+    ${r.attachments.length ? `<div class="thumbs">${r.attachments.map((attachment, i) => `<div class="thumb">${thumbnailButton(attachment, i)}</div>`).join("")}</div>` : ""}</section>
+    <section><h3>本单收款</h3>${r.payments.length ? r.payments.map(p => `<div class="detail-payment"><time>${esc(p.date)}</time><span>${esc(p.stage)} · ${esc(p.platform)}</span><b>¥${money(p.amount)}</b></div>`).join("") : "暂无收款记录"}</section></div>
+    <div class="dialog-foot"><button class="btn" data-action="edit">编辑约稿</button></div>`;
+  hideChartTip();
+  dialog.showModal();
+}
+
 function receiptList() {
   const query = state.receiptQuery.trim().toLowerCase();
   const entries = state.receipts.filter((p) =>
@@ -298,7 +355,7 @@ function receiptList() {
   );
   if (!entries.length) return empty(query ? "没有匹配的收款" : "暂无收款记录");
   const cutoff = localDay();
-  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="edit">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function receiptsPage() {
   return (
@@ -316,6 +373,7 @@ function settingsPage() {
   );
 }
 function render() {
+  hideChartTip();
   const page = location.hash.slice(1),
     pages = {
       overview: "工作台",
@@ -588,7 +646,11 @@ async function onClick(event) {
       b.setAttribute("aria-expanded", String(!panel.hidden));
       break;
     }
+    case "detail":
+      openCommissionDetail(key);
+      break;
     case "edit":
+      if ($("#commissionDetail").open) $("#commissionDetail").close();
       openEditor(key);
       break;
     case "resume":
@@ -748,7 +810,7 @@ document.addEventListener("change", async (e) => {
   try {
     if (el.id === "months") {
       state.year = el.value.startsWith("y") ? Number(el.value.slice(1)) : null;
-      if (!state.year) state.months = Number(el.value);
+      if (!state.year) state.months = el.value === "all" ? "all" : Number(el.value);
       await refresh();
     }
     if (el.id === "files") await addFiles(el);

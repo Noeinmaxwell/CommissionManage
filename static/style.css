@@ -1731,3 +1731,41 @@ main > * {
 .brief-field {
   margin-bottom: 14px;
 }
+
+.plot-scroll { overflow-x: auto; }
+.charts > .card { min-width: 0; }
+#chartTip {
+  position: fixed;
+  z-index: 10;
+  pointer-events: none;
+  max-width: calc(100vw - 12px);
+  overflow-wrap: anywhere;
+  background: #253854;
+  color: white;
+  border-radius: 7px;
+  padding: 7px 10px;
+  font-size: 13px;
+  box-shadow: var(--shadow);
+}
+#commissionDetail[open] {
+  display: flex;
+  flex-direction: column;
+}
+#commissionDetail .dialog-scroll { overflow-wrap: anywhere; }
+.detail-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+.detail-fields dt { font-size: 12px; color: var(--muted); }
+.detail-fields dd { margin: 3px 0 0; }
+.detail-brief { white-space: pre-wrap; }
+.detail-payment {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 0;
+  font-size: 13px;
+}
+.detail-payment b { margin-left: auto; }

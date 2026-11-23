@@ -155,6 +155,20 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(stats["average"], 1.02)
         self.assertEqual(stats["platforms"], {"微信": 1.05, "支付宝": 1})
 
+    def test_all_time_includes_quiet_months(self):
+        now = today()
+        month = now.strftime("%Y-%m")
+        self.assertEqual(self.api("/stats?all_time=true")["monthly"], {month: 0})
+        first = now.replace(day=1, year=now.year - 11)
+        self.api("/commissions", "POST", {
+            "payments": [{"amount": 25, "date": first.isoformat()}]
+        })
+        months = self.api("/stats?all_time=true")["monthly"]
+        self.assertEqual(len(months), 133)
+        self.assertEqual(months[first.strftime("%Y-%m")], 25)
+        self.assertEqual(months[month], 0)
+        self.assertEqual(sum(months.values()), 25)
+
     def test_client_history_and_all_payments(self):
         now = today()
         account = {"nickname": "小花猫", "contact_type": "QQ", "contact": "demo-A"}

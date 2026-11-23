@@ -46,7 +46,7 @@ else
 fi
 git config "branch.$branch.remote" origin
 git config "branch.$branch.merge" "refs/heads/$branch"
-bash deploy/install.sh
+bash deploy/install.sh 100.79.13.109
 REMOTE
 )
 tailscale ssh root@ubuntu-server-codex "$remote_script" < "$bundle"

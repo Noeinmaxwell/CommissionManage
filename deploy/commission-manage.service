@@ -1,6 +1,6 @@
 [Unit]
 Description=CommissionManage web application
-After=network-online.target tailscaled.service
+After=network-online.target
 Wants=network-online.target
 
 [Service]
@@ -10,7 +10,7 @@ StateDirectory=commission-manage
 WorkingDirectory=/home/code/CommissionManage
 Environment=COMMISSION_DB=/var/lib/commission-manage/studio.sqlite3
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/home/code/CommissionManage/.venv/bin/python -m uvicorn app:app --host 100.79.13.109 --port 5444
+ExecStart=/home/code/CommissionManage/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 5444
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

@@ -12,10 +12,17 @@
 - 甲方卡显示已完成单数、累计实收和最近收款日期。历史优先按联系方式和账号归集；未填账号时使用昵称，昵称对应多个账号时独立统计。收款记录页按日期倒序列出所有约稿的逐笔稿费，可搜索甲方、日期、阶段或支付方式，并打开原约稿。
 - 首次启用此版本时，空库自动加入 9 条带标记的示例约稿和 8 笔收款。已有数据可在设置页手动加载示例，使用「清除示例」移除这些记录及关联数据。
 - 设置页可维护支付方式及联系方式，下载或恢复含原图的 JSON 备份。导入前显示确认，导入失败会回滚。移除下拉选项不会改写历史记录。
+- 点击工作台排队预览或收款明细中的任意一行可查看对应约稿。将鼠标移到收入柱或收入来源扇区可查看金额。每月收入支持选择「全部时间」，覆盖首笔实收所在月至本月。
 
-## 本地运行
+## Windows 桌面启动
 
-需要 Python 3.10 或更高版本。
+安装 Python 3.10 或更高版本，包含 Windows Python 启动器（终端中可运行 `py -3 --version`）。将仓库下载或克隆到可写目录，双击根目录的 `start-windows.cmd`。首次启动需要联网下载依赖；脚本会创建项目虚拟环境，启动本机服务，并在默认浏览器打开 <http://127.0.0.1:5444/>。
+
+可为该脚本创建桌面快捷方式。使用期间保留命令窗口，按 Ctrl+C 停止服务。本机数据和原图保存在项目目录的 `var/studio.sqlite3`，也可通过环境变量 `COMMISSION_DB` 指定位置。
+
+## 本地开发
+
+在装有 Python 3.10 或更高版本的 Linux 或 macOS 环境中，从仓库根目录运行：
 
 ```sh
 python3 -m venv .venv
@@ -23,24 +30,33 @@ python3 -m venv .venv
 .venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 5444
 ```
 
-打开 <http://127.0.0.1:5444/>。本地数据库默认为 `var/studio.sqlite3`，可通过 `COMMISSION_DB` 指定路径。
+打开 <http://127.0.0.1:5444/>。默认数据文件为 `var/studio.sqlite3`。
 
-## Tailscale 服务器
+## Linux 部署
 
-从已加入对应 Tailnet、可执行 `tailscale ssh root@ubuntu-server-codex` 的仓库副本运行：
+以下命令适用于使用 systemd 的 Ubuntu 22.04 或更新版本。安装脚本使用 Python 3.10+，将应用注册为开机服务，并把数据库和原图保存在 `/var/lib/commission-manage/studio.sqlite3`。
 
 ```sh
-bash deploy.sh
+sudo apt-get update
+sudo apt-get install -y git python3 python3-venv curl
+sudo mkdir -p /home/code
+sudo git clone https://github.com/Noeinmaxwell/CommissionManage.git /home/code/CommissionManage
+cd /home/code/CommissionManage
+sudo bash deploy/install.sh
 ```
 
-脚本用 Git bundle 将当前分支已提交的版本传到服务器，在 `/home/code/CommissionManage` 建立或快进更新工作树，并连接 GitHub origin。首次部署私有仓库无需向服务器复制 GitHub 凭据。以后在服务器直接访问私有 origin 时，使用服务器自己的 GitHub 授权。
+默认监听本机 <http://127.0.0.1:5444/>。从自己的电脑访问远程部署时，可运行 `ssh -L 5444:127.0.0.1:5444 用户名@服务器`，再打开同一地址。要让可信网络中的其他设备直接访问，可将服务器的内网 IPv4 地址作为安装脚本的参数。能连接此端口的用户可读写约稿。
 
-安装脚本创建 Python 虚拟环境并注册 systemd 开机服务，监听 <http://100.79.13.109:5444/>。服务的 SQLite 数据与原图保存在 `/var/lib/commission-manage/studio.sqlite3`，更新代码时保留。服务使用 Tailnet 访问控制，能连接该端口的成员可读写工作台。已有目标工作树可直接以 root 运行 `bash deploy/install.sh` 安装服务。
+已有部署可在仓库目录执行 `sudo git pull --ff-only`，再用原监听地址重新运行安装脚本。使用以下命令查看运行状态和日志。
 
 ```sh
 systemctl status commission-manage
 journalctl -u commission-manage -n 80
 ```
+
+## AI 使用声明
+
+本项目使用 OpenAI Codex 辅助编写和修改代码、测试及文档。约稿管理与收入统计在本地服务中运行，无需配置 AI API 密钥。
 
 ## API
 
@@ -49,7 +65,7 @@ journalctl -u commission-manage -n 80
 用金额和日期建立一条约稿并记账：
 
 ```sh
-curl -X POST http://100.79.13.109:5444/api/commissions \
+curl -X POST http://127.0.0.1:5444/api/commissions \
   -H 'Content-Type: application/json' \
   -d '{"payments":[{"amount":360,"date":"260228"}]}'
 ```
