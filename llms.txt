@@ -10,6 +10,15 @@
 
 应用 API 直接接受请求，无需登录凭据。
 
+## 先分清 ID、队列和状态
+
+- 路径 /api/commissions/{key} 中的 key 是这一份约稿的 id，可从新建响应或约稿列表取得。同一甲方的不同约稿各有自己的 id。图片路径 /api/images/{key} 使用附件的 id。
+- queue 只有 normal（排队中，默认）和 deferred（延期等待）。status 可填「未开始」「进行中」「已结稿」。补录历史单直接 POST /api/commissions，例 {"nickname":"小林","title":"角色头像","status":"已结稿"}。
+- 新建时可以一起传 contact_type、contact、requirements、planned、started、payments 和 attachments。在 /docs 的新建接口选择「填写联系账号、排期与稿费」查看完整请求示例。
+- 假设当前顺序是 A、B。新建 C 时在 URL 传 ?before=B的ID，结果是 A、C、B，C 自动带插队标记。省略 before 会加到队尾。手动设置 is_priority 只控制标签。
+- 移动已有的 C 时，POST /api/commissions/C的ID/move，请求体传 {"before":"A的ID"} 就会把 C 移到 A 前面。两者须在同一个未结稿队列。before 填 null 表示移到队尾。
+- 前端编辑窗口使用 PUT 保存整单。如果一份未结稿的普通排队约稿在编辑后仍未结稿，且提交时沿用普通队列，把已有的预计开始日期改晚就会自动移到延期队尾。从空白首次填入日期、清空日期或改早均不会触发这项规则。「延期」按钮则直接移动约稿，无需填写日期。
+
 ## 读取接口示例
 
 在 /docs 展开端点后，从 Examples 选择命名示例。程序可读取 /openapi.json 中 paths 下对应方法的 requestBody.content["application/json"].examples，每个示例的 value 都是 JSON 请求体。路径中的 key 和示例中的占位 ID 需要换成实际读取的值。POST /api/commissions/{key}/payments 还需要为新操作生成 Idempotency-Key。

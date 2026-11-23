@@ -18,7 +18,11 @@ EDIT_NOTE = "从最新 GET 详情构造完整请求，保留本次没有修改�
 
 CREATE = {
     "queue": example("新建排队约稿", {"nickname": "小林", "title": "角色头像"}),
-    "mixed": example("已收定金并约定尾款", ORDER),
+    "mixed": example("填写联系账号、排期与稿费", {**ORDER, "queue": "normal", "status": "进行中",
+                                               "planned": "2026-03-01", "started": "2026-03-02"}),
+    "archived": example("补录已结稿的历史约稿", {**ORDER, "status": "已结稿", "payments": [DEPOSIT]}),
+    "insert": example("在指定约稿前新建一单", {"nickname": "小许", "queue": "normal"},
+                      "在上方 Parameters 的 before 填同队目标约稿 ID，再执行请求。"),
     "deferred": example("直接加入延期队列", {"nickname": "小许", "queue": "deferred"}),
 }
 UPDATE = {
