@@ -185,16 +185,10 @@ function setupMonthlyChart() {
     const [year, month] = entries[0][0].split("-").map(Number);
     entries.unshift([`${month === 1 ? year - 1 : year}-${String(month === 1 ? 12 : month - 1).padStart(2, "0")}`, 0]);
   }
-  const peak = entries.reduce((max, [, n]) => Math.max(max, n), 100);
-  const unit = 10 ** Math.floor(Math.log10(peak));
-  const top = Math.ceil(peak / unit) * unit;
   const left = 49, width = 463, bottom = 145;
-  let grid = "";
-  for (let i = 0; i <= 4; i++) {
-    const y = bottom - 32 * i, v = top * i / 4;
-    grid += `<line x1="49" x2="512" y1="${y}" y2="${y}" stroke="#dce5f0" stroke-dasharray="3 5"/><text x="42" y="${y + 4}" text-anchor="end">${v >= 10000 ? +(v / 10000).toFixed(1) + "万" : +v.toFixed(1)}</text>`;
-  }
-  svg.innerHTML = grid + '<defs><clipPath id="month-clip"><rect x="49" width="463" height="175"/></clipPath></defs><g class="months" clip-path="url(#month-clip)"></g>';
+  svg.innerHTML = '<g class="income-axis"></g><defs><clipPath id="month-clip"><rect x="49" width="463" height="175"/></clipPath></defs><g class="months" clip-path="url(#month-clip)"></g>';
+  const axis = svg.querySelector(".income-axis");
+  let top = 0;
   const layer = svg.querySelector(".months");
   let span = Math.min(preset, 18), start = entries.length - span;
   let targetSpan = span, targetStart = start, frame = 0, drag = null;
@@ -202,8 +196,23 @@ function setupMonthlyChart() {
   function paint() {
     const step = width / span, bw = Math.min(35, step * 0.56);
     const stride = Math.max(1, Math.ceil(span / 10));
+    const first = Math.floor(start);
+    const end = Math.min(entries.length, Math.ceil(start + span));
+    let peak = 100;
+    for (let i = first; i < end; i++) peak = Math.max(peak, entries[i][1]);
+    const unit = 10 ** Math.floor(Math.log10(peak));
+    const nextTop = Math.ceil(peak / unit) * unit;
+    if (nextTop !== top) {
+      top = nextTop;
+      let grid = "";
+      for (let i = 0; i <= 4; i++) {
+        const y = bottom - 32 * i, v = top * i / 4;
+        grid += `<line x1="49" x2="512" y1="${y}" y2="${y}" stroke="#dce5f0" stroke-dasharray="3 5"/><text x="42" y="${y + 4}" text-anchor="end">${v >= 10000 ? +(v / 10000).toFixed(1) + "万" : +v.toFixed(1)}</text>`;
+      }
+      axis.innerHTML = grid;
+    }
     let bars = "";
-    for (let i = Math.floor(start); i < Math.min(entries.length, Math.ceil(start + span)); i++) {
+    for (let i = first; i < end; i++) {
       const [month, amount] = entries[i];
       const x = left + (i - start + 0.5) * step, h = Math.max(1.5, amount / top * 128);
       bars += `<g><rect class="bar ${i === entries.length - 1 ? "current" : ""}" data-tip="${month} · 收入 ¥${money(amount)}" x="${x - bw / 2}" y="${bottom - h}" width="${bw}" height="${h}" rx="3"/>${i % stride === 0 ? `<text x="${x}" y="166" text-anchor="middle">${span > 12 || month.endsWith("-01") ? month : Number(month.slice(5)) + "月"}</text>` : ""}</g>`;
