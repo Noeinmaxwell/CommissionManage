@@ -134,8 +134,7 @@ async function refresh() {
   const query = new URLSearchParams({page});
   if (page === "overview") {
     if (state.year) query.set("year", state.year);
-    else if (state.months === "all") query.set("all_time", "true");
-    else query.set("months", state.months);
+    else query.set("all_time", "true");
   }
   const snapshot = await api("/workspace?" + query);
   if (id !== loadId) return;
@@ -171,31 +170,90 @@ function metric(kind) {
   </button>`;
 }
 function monthlyChart(values) {
-  const entries = Object.entries(values),
-    max = entries.reduce((peak, [, value]) => Math.max(peak, value), 100);
-  const unit = 10 ** Math.floor(Math.log10(max)),
-    top = Math.ceil(max / unit) * unit;
-  const left = 49,
-    right = Math.max(512, left + 28 * entries.length),
-    bottom = 145,
-    w = (right - left) / entries.length;
-  let html = "";
-  for (let i = 0; i <= 4; i++) {
-    const y = bottom - 32 * i,
-      v = (top * i) / 4;
-    html += `<line x1="${left}" x2="${right}" y1="${y}" y2="${y}" stroke="#dce5f0" stroke-dasharray="3 5"/><text x="${left - 7}" y="${y + 4}" text-anchor="end">${v >= 10000 ? +(v / 10000).toFixed(1) + "万" : +v.toFixed(1)}</text>`;
+  const entries = Object.entries(values);
+  const months = state.year || state.months === "all" ? entries.length : state.months;
+  return `<div class="plot-scroll" title="滚轮缩放，按住左右拖动"><svg class="plot" viewBox="0 0 520 175" role="img" aria-label="月收入柱状图"></svg></div><details class="chart-data"><summary>查看月收入明细</summary>${entries.slice(-months).map(([m, n]) => `<div><span>${m}</span><b>¥${money(n)}</b></div>`).join("")}</details>`;
+}
+
+function setupMonthlyChart() {
+  const svg = $(".plot");
+  const entries = Object.entries(state.stats.monthly);
+  if (!entries.length) return;
+  const preset = state.year || state.months === "all" ? entries.length : Number(state.months);
+  // Keep quiet months in the initial range even for a newly started studio.
+  while (entries.length < preset) {
+    const [year, month] = entries[0][0].split("-").map(Number);
+    entries.unshift([`${month === 1 ? year - 1 : year}-${String(month === 1 ? 12 : month - 1).padStart(2, "0")}`, 0]);
   }
-  entries.forEach(([key, n], i) => {
-    const x = left + w * (i + 0.5),
-      h = (n / top) * 128,
-      bw = Math.min(35, w * 0.56),
-      current = i === entries.length - 1;
-    const label = entries.length > 12
-      ? (i % 3 === 0 ? key : "")
-      : Number(key.slice(5)) + "月";
-    html += `<g><rect data-tip="${key} · 收入 ¥${money(n)}" class="bar ${current ? "current" : ""}" x="${x - bw / 2}" y="${bottom - Math.max(h, 1.5)}" width="${bw}" height="${Math.max(h, 1.5)}" rx="3"/><text x="${x}" y="166" text-anchor="middle">${label}</text></g>`;
+  const peak = entries.reduce((max, [, n]) => Math.max(max, n), 100);
+  const unit = 10 ** Math.floor(Math.log10(peak));
+  const top = Math.ceil(peak / unit) * unit;
+  const left = 49, width = 463, bottom = 145;
+  let grid = "";
+  for (let i = 0; i <= 4; i++) {
+    const y = bottom - 32 * i, v = top * i / 4;
+    grid += `<line x1="49" x2="512" y1="${y}" y2="${y}" stroke="#dce5f0" stroke-dasharray="3 5"/><text x="42" y="${y + 4}" text-anchor="end">${v >= 10000 ? +(v / 10000).toFixed(1) + "万" : +v.toFixed(1)}</text>`;
+  }
+  svg.innerHTML = grid + '<defs><clipPath id="month-clip"><rect x="49" width="463" height="175"/></clipPath></defs><g class="months" clip-path="url(#month-clip)"></g>';
+  const layer = svg.querySelector(".months");
+  let span = Math.min(preset, 18), start = entries.length - span;
+  let targetSpan = span, targetStart = start, frame = 0, drag = null;
+  const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
+  function paint() {
+    const step = width / span, bw = Math.min(35, step * 0.56);
+    const stride = Math.max(1, Math.ceil(span / 10));
+    let bars = "";
+    for (let i = Math.floor(start); i < Math.min(entries.length, Math.ceil(start + span)); i++) {
+      const [month, amount] = entries[i];
+      const x = left + (i - start + 0.5) * step, h = Math.max(1.5, amount / top * 128);
+      bars += `<g><rect class="bar ${i === entries.length - 1 ? "current" : ""}" data-tip="${month} · 收入 ¥${money(amount)}" x="${x - bw / 2}" y="${bottom - h}" width="${bw}" height="${h}" rx="3"/>${i % stride === 0 ? `<text x="${x}" y="166" text-anchor="middle">${span > 12 || month.endsWith("-01") ? month : Number(month.slice(5)) + "月"}</text>` : ""}</g>`;
+    }
+    layer.innerHTML = bars;
+  }
+  function animate() {
+    frame = 0;
+    if (!svg.isConnected) return;
+    const done = Math.abs(targetSpan - span) + Math.abs(targetStart - start) < 0.005;
+    const ease = done || matchMedia("(prefers-reduced-motion: reduce)").matches ? 1 : 0.24;
+    span += (targetSpan - span) * ease;
+    start = clamp(start + (targetStart - start) * ease, 0, entries.length - span);
+    paint();
+    if (ease < 1) frame = requestAnimationFrame(animate);
+  }
+  function schedule() {
+    hideChartTip();
+    if (!frame) frame = requestAnimationFrame(animate);
+  }
+  const point = e => (e.clientX - svg.getScreenCTM().e) / svg.getScreenCTM().a;
+  svg.addEventListener("wheel", e => {
+    if (drag || !e.deltaY) return;
+    e.preventDefault();
+    const anchor = clamp((point(e) - left) / width, 0, 1);
+    const delta = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 175 : 1);
+    const next = clamp(targetSpan * Math.exp(clamp(delta, -500, 500) * 0.0025), 1, entries.length);
+    targetStart = clamp(targetStart + anchor * (targetSpan - next), 0, entries.length - next);
+    targetSpan = next;
+    schedule();
+  }, {passive: false});
+  svg.addEventListener("pointerdown", e => {
+    if (e.button !== 0 || !e.isPrimary) return;
+    targetSpan = span;
+    targetStart = start;
+    drag = {x: point(e), start, id: e.pointerId};
+    svg.setPointerCapture(e.pointerId);
+    svg.classList.add("dragging");
+    hideChartTip();
   });
-  return `<div class="plot-scroll"><svg class="plot" style="min-width:${right > 512 ? right + 8 : 0}px" viewBox="0 0 ${right + 8} 175" role="img" aria-label="月收入柱状图">${html}</svg></div><details class="chart-data"><summary>查看月收入明细</summary>${entries.map(([m, n]) => `<div><span>${m}</span><b>¥${money(n)}</b></div>`).join("")}</details>`;
+  svg.addEventListener("pointermove", e => {
+    if (drag?.id !== e.pointerId) return;
+    targetStart = clamp(drag.start + (drag.x - point(e)) / width * span, 0, entries.length - span);
+    schedule();
+  });
+  svg.addEventListener("lostpointercapture", () => {
+    drag = null;
+    svg.classList.remove("dragging");
+  });
+  paint();
 }
 const colors = [
   "#5480de",
@@ -332,7 +390,7 @@ function queueList() {
         </div>
         <div class="queue-schedule">
           <div class="queue-value"><span>预计开始</span><b>${esc(r.planned || "待定")}</b></div>
-          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span>${Number(r.agreed_total) > 0 ? `<span class="agreed-total">约定 ¥${money(r.agreed_total)}</span>` : ""}</div>
+          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span>${Number(r.agreed_total) > 0 ? `<span class="agreed-total" title="付款约定合计">¥${money(r.agreed_total)}</span>` : ""}</div>
         </div>
         <div class="client-history">
           <div class="queue-value"><span>累计收款</span><b>¥${money(r.history.total)}</b></div>
@@ -434,6 +492,7 @@ function render() {
     receipts: receiptsPage,
   };
   $("#main").innerHTML = views[state.page]();
+  if (state.page === "overview") setupMonthlyChart();
 }
 
 function choices(options, value) {
@@ -681,7 +740,7 @@ async function showSuggestions() {
   $("#suggestions").innerHTML = found
     .map(
       (r, i) =>
-        `<button type="button" data-action="suggest" data-index="${i}">${esc(r.nickname)}<small>${esc(r.contact_type)} ${esc(r.contact)}</small></button>`,
+        `<button type="button" data-action="suggest" data-index="${i}" title="${esc(r.nickname)} · ${esc(r.contact_type)} ${esc(r.contact)}"><span>${esc(r.nickname)}</span><small>${esc(r.contact_type)} ${esc(r.contact)}</small></button>`,
     )
     .join("");
 }
