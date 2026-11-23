@@ -774,13 +774,20 @@ class Client(BaseModel):
     response_model=list[Client],
 )
 def suggest(q: str = Query("", openapi_examples={"nickname": api_examples.example("按昵称搜索", "小林"),
-                                                "initials": api_examples.example("按拼音首字母搜索", "xl")})):
+                                                "initials": api_examples.example("按拼音首字母搜索", "xl")}),
+            contact_type: str | None = Query(None, description="指定联系方式时，按账号搜索并去重")):
     with database() as db:
         found = {}
         for r in db.execute("SELECT body FROM jobs ORDER BY rowid DESC"):
             x = json.loads(r[0])
             identity = (x["nickname"], x["contact_type"], x["contact"])
-            if identity not in found and matches(x["nickname"], q.strip()):
+            if contact_type is not None:
+                if x["contact_type"] != contact_type or not x["contact"] or q.strip().casefold() not in x["contact"].casefold():
+                    continue
+                identity = x["contact"]
+            elif not matches(x["nickname"], q.strip()):
+                continue
+            if identity not in found:
                 found[identity] = x
             if len(found) >= 8:
                 break
