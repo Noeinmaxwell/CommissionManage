@@ -4,7 +4,6 @@ import base64
 import binascii
 import hashlib
 import csv
-import inspect
 import math
 import json
 import os
@@ -37,19 +36,12 @@ from pypinyin import lazy_pinyin
 
 ROOT = Path(__file__).parent
 DB = Path(os.getenv("COMMISSION_DB", ROOT / "var" / "studio.sqlite3"))
-# Reuse the published guide sections in the corresponding Swagger operations.
+# Swagger and /llms.txt show the same instructions for each operation.
 GUIDE = (ROOT / "llms.txt").read_text(encoding="utf-8")
-GUIDE_SECTIONS = dict(section.split("\n", 1) for section in GUIDE.split("\n## ")[1:])
-
-
-def documented(*sections):
-    def decorate(endpoint):
-        parts = [inspect.getdoc(endpoint) or ""]
-        parts.extend(GUIDE_SECTIONS[section].strip() for section in sections)
-        endpoint.__doc__ = "\n\n".join(filter(None, parts))
-        return endpoint
-    return decorate
-
+GUIDE_SECTIONS = {
+    heading: body.strip()
+    for heading, body in (section.split("\n", 1) for section in GUIDE.split("\n## ")[1:])
+}
 
 MAX_IMAGE = 12 * 1024 * 1024
 
@@ -366,7 +358,8 @@ app = FastAPI(
     redoc_url=None,
     lifespan=lifespan,
     servers=[{"url": "/"}],
-    description="本规范描述当前 API；[调用指南](/llms.txt) 提供操作流程。info.version 是接口版本，备份格式 version 固定为 1。仅在可信网络或有访问控制的反向代理后部署。以 CNY 记账，日期使用上海时区。日期接受 YYYY-MM-DD、YYYYMMDD、YYMMDD（前缀 20，如 991231 表示 2099-12-31），输出为 YYYY-MM-DD。接口无需凭据，浏览器使用同源地址，服务不提供跨域 CORS。列表全量返回。\n\n" + GUIDE_SECTIONS["错误处理顺序"].strip(),
+    description="选择下面的接口，先看它能做什么，再看页面上的操作和参数表。日期按上海时间，金额以人民币元计。"
+                "日期可以写成 2026-02-28、20260228 或 260228。服务没有登录，浏览器请从本站调用。示例中的约稿编号和版本号请换成你实际读到的值。[查看完整指南和常见错误](/llms.txt)。",
 )
 
 
@@ -601,15 +594,14 @@ def histories(records):
 @app.get(
     "/api/commissions",
     tags=["约稿"],
-    summary="列出约稿及甲方历史，可按状态和队列筛选",
+    summary="查看约稿列表和甲方历史收款",
+    description=GUIDE_SECTIONS["GET /api/commissions"],
     response_model=list[Card],
     response_model_exclude_none=True,
     responses={200: json_example([api_examples.CARD]),
                422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
 )
-@documented('队列、筛选和顺位')
 def list_commissions(status: Status | None = None, queue: Queue | None = None):
-    """省略过滤条件时返回全部（含已结稿），按存储顺位、同位按插入顺序排列，可混合多个队列。传 queue 仅返回该队未结稿的约稿；查看历史用 status=已结稿 并省略 queue。"""
     with database() as db:
         records = rows(db)
     return commission_cards(records, status, queue)
@@ -632,10 +624,10 @@ def commission_cards(records, status=None, queue=None):
     "/api/payments",
     tags=["收款"],
     summary="列出所有甲方的逐笔收款，按支付日期倒序",
+    description=GUIDE_SECTIONS["GET /api/payments"],
     response_model=list[Receipt],
     responses={200: json_example([api_examples.RECEIPT])},
 )
-@documented('金额、日期与查询未收款')
 def receipts():
     with database() as db:
         return receipt_rows(rows(db))
@@ -661,24 +653,18 @@ def receipt_rows(records):
     "/api/commissions",
     tags=["约稿"],
     summary="新建约稿，可插入指定位置",
+    description=GUIDE_SECTIONS["POST /api/commissions"],
     status_code=201,
     response_model=VersionedCommission,
     response_model_exclude_none=True,
     responses={201: {"headers": {**ETAG_HEADER, "Location": header_spec("新单详情路径")}},
                **write_errors(images=True, conflict="before 目标不存在、已结稿或在其他队列")},
 )
-@documented('队列、筛选和顺位')
 def create(
     response: Response,
     item: Annotated[Commission, Body(openapi_examples=api_examples.CREATE)],
     before: str | None = Query(None, description="位置填在 URL 查询参数中。传入同队未结稿约稿的 id，新单插在它前面；省略则追加到队尾；普通新建请留空。"),
 ):
-    """请求体填写约稿信息。从 Examples 选择「填写联系账号、排期与稿费」可查看字段组合。
-    `queue` 选 `normal`（排队中）或 `deferred`（延期等待）。直接建历史单请传 `status="已结稿"`。
-
-    例如队列已有 A、B。调用 `POST /api/commissions?before=B的ID` 新建 C，结果为 A、C、B，
-    C 自动带「插队」标记。只在请求体中设置 `is_priority=true` 会添加标记，位置仍按 before 决定。
-    已结稿的新单忽略 before。成功返回 201，响应的 id 可用于后续操作。重复提交会创建多单。"""
     with database(True) as db:
         key = uuid4().hex
         insert_before = before if item.status != "已结稿" else None
@@ -696,11 +682,11 @@ def create(
     "/api/commissions/{key}",
     tags=["约稿"],
     summary="读取约稿详情",
+    description=GUIDE_SECTIONS["GET /api/commissions/{key}"],
     response_model=VersionedCommission,
     response_model_exclude_none=True,
     responses={200: {**json_example(api_examples.DETAIL), "headers": ETAG_HEADER}, 422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}, 404: {"model": ErrorResponse, "description": "约稿不存在"}},
 )
-@documented('版本和重试')
 def detail(key: CommissionKey, response: Response):
     with database() as db:
         record = lookup(db, key)
@@ -712,23 +698,12 @@ def detail(key: CommissionKey, response: Response):
     "/api/commissions/{key}",
     tags=["约稿"],
     summary="保存编辑后的约稿（与前端编辑窗口相同）",
+    description=GUIDE_SECTIONS["PUT /api/commissions/{key}"],
     response_model=VersionedCommission,
     response_model_exclude_none=True,
     responses={200: {"headers": ETAG_HEADER}, **write_errors(missing=True, images=True, conflict="revision_conflict：重新 GET 并核对改动")},
 )
-@documented('整单编辑的空值规则', '版本和重试', '队列、筛选和顺位')
 def update(key: CommissionKey, response: Response, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
-    """先 GET 同一路径再编辑。
-
-        未知字段会忽略。payments 没有行 ID：修改最新 GET 结果中的目标行，再提交整个数组。
-    服务器直接按提交顺序保存；少传一行会删除该行，多传相同行会重复记账。
-    同阶段同金额的行要在最新详情中按完整内容及位置核对；若无法唯一定位，请先确认。
-    版本过期返回 409，此时重新读取并核对修改。
-
-    与前端「编辑约稿 → 保存约稿」使用同一规则：编辑前后均未结稿，原队列和提交的队列均为 normal
-    （编辑时省略 queue 表示沿用原队列），且新旧 planned 都有日期时，改到更晚一天或更晚会自动移入延期队尾。
-    例如从 3 月 1 日改到 3 月 5 日会延期；首次填日期、清空、提前或保持日期都不会触发自动延期。
-    前端卡片的「延期」按钮则直接调用 POST /api/commissions/{key}/defer，无需编辑日期。"""
     with database(True) as db:
         previous = lookup(db, key)
         if previous["revision"] != item.revision:
@@ -759,7 +734,8 @@ def update(key: CommissionKey, response: Response, item: Annotated[CommissionUpd
 
 
 @app.delete(
-    "/api/commissions/{key}", tags=["约稿"], summary="删除约稿、全部稿费、附件及本单幂等记录", status_code=204,
+    "/api/commissions/{key}", tags=["约稿"], summary="删除一份约稿及其稿费和图片",
+    description=GUIDE_SECTIONS["DELETE /api/commissions/{key}"], status_code=204,
     responses=write_errors(missing=True),
 )
 def remove(key: CommissionKey):
@@ -773,14 +749,11 @@ def remove(key: CommissionKey):
     "/api/commissions/{key}/move",
     tags=["排队"],
     summary="调整排队位置",
+    description=GUIDE_SECTIONS["POST /api/commissions/{key}/move"],
     status_code=204,
     responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="当前单已结稿，或 before 目标不存在、已结稿或在其他队列")},
 )
-@documented('队列、筛选和顺位')
 def move_job(key: CommissionKey, movement: Annotated[Movement, Body(openapi_examples=api_examples.MOVE)]):
-    """路径 key 填要移动的约稿 ID，请求体 before 填目标约稿 ID。两单都须未结稿且在同一队列。
-    例如队列为 A、B、C，向 /api/commissions/C的ID/move 发送 {"before":"A的ID"}，结果为 C、A、B。
-    发送 {} 或 {"before":null} 会移到队尾。成功返回 204，跨队移动返回 409。"""
     with database(True) as db:
         row = lookup(db, key)
         move(db, key, movement.before, row.get("queue", "normal"))
@@ -791,18 +764,11 @@ class StatusChange(BaseModel):
     status: Literal["进行中", "已结稿"]
 
 
-@app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿", status_code=204,
-    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="当前状态不允许此次迁移，见下表")},
+@app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿",
+    description=GUIDE_SECTIONS["PATCH /api/commissions/{key}/status"], status_code=204,
+    responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="这份约稿目前不能改为请求的状态")},
 )
 def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(openapi_examples=api_examples.STATUS)]):
-    """| 当前状态 | 请求进行中 | 请求已结稿 |
-    |---|---|---|
-    | 未开始 | 204 开始 | 409 |
-    | 进行中 | 204 保持 | 204 结稿 |
-    | 已结稿 | 409 | 204 保持 |
-
-    未开始不在此请求枚举内，参数校验返回 422。此接口仅改 status，started 由编辑者填写。结稿后保留 queue 字段，仍可追加稿费。
-    """
     with database(True) as db:
         current = lookup(db, key)["status"]
         expected = "未开始" if change.status == "进行中" else "进行中"
@@ -821,10 +787,10 @@ def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(opena
     "/api/commissions/{key}/defer",
     tags=["排队"],
     summary="移入延期等待队尾",
+    description=GUIDE_SECTIONS["POST /api/commissions/{key}/defer"],
     status_code=204,
     responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="已结稿约稿不能延期")},
 )
-@documented('队列、筛选和顺位')
 def defer_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "deferred")
@@ -835,10 +801,10 @@ def defer_job(key: CommissionKey):
     "/api/commissions/{key}/resume",
     tags=["排队"],
     summary="恢复至正常队尾",
+    description=GUIDE_SECTIONS["POST /api/commissions/{key}/resume"],
     status_code=204,
     responses={204: {"headers": ETAG_HEADER}, **write_errors(missing=True, conflict="已结稿约稿不能恢复排队")},
 )
-@documented('队列、筛选和顺位')
 def resume_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "normal")
@@ -849,19 +815,18 @@ def resume_job(key: CommissionKey):
     "/api/commissions/{key}/payments",
     tags=["收款"],
     summary="追加一笔收款或无日期的付款约定",
+    description=GUIDE_SECTIONS["POST /api/commissions/{key}/payments"],
     response_model=VersionedCommission,
     response_model_exclude_none=True,
     responses={200: {"headers": {**ETAG_HEADER, "Idempotent-Replayed": header_spec("首次写入 false；已处理的同内容重试 true")}},
                **write_errors(missing=True, conflict="idempotency_key_conflict：本单已用此键提交其他内容")},
 )
-@documented('幂等摘要', '版本和重试')
 def pay(
     response: Response,
     key: CommissionKey,
     payment: Annotated[Payment, Body(openapi_examples=api_examples.PAYMENT)],
     idempotency_key: Annotated[str, Header(alias="Idempotency-Key", min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ):
-    """键按约稿 ID 独立，限 1–128 个可打印 ASCII 字符（排除空格）。同键同体重试返回当前约稿和 200，Idempotent-Replayed 为 true；同键不同体返回 409。已结稿约稿也可追加。"""
     with database(True) as db:
         previous = lookup(db, key)
         # Omitted date/platform defaults may change between attempts.
@@ -889,6 +854,7 @@ def pay(
     "/api/images/{key}",
     tags=["附件"],
     summary="获取原图或最多 240 像素的缩略图",
+    description=GUIDE_SECTIONS["GET /api/images/{key}"],
     response_class=Response,
     responses={422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"},
         404: {"model": ErrorResponse, "description": "附件 ID 不存在"},
@@ -902,7 +868,6 @@ def pay(
         }
     },
 )
-@documented('附件与备份边界')
 def image(key: Annotated[str, PathParam(description="参考图的附件 ID，取自约稿详情 attachments[].id")], thumbnail: bool = Query(False, description="省略或 false 返回原图；true 返回等比、不放大的 PNG，长边最多 240px，大小可能超过原图")):
     with database() as db:
         if thumbnail:
@@ -957,7 +922,8 @@ class Client(BaseModel):
 @app.get(
     "/api/clients",
     tags=["约稿"],
-    summary="历史甲方联想，支持中文、拼音和首字母混输",
+    summary="根据昵称或账号查找已有甲方",
+    description=GUIDE_SECTIONS["GET /api/clients"],
     response_model=list[Client],
     responses={200: json_example([{k: api_examples.DETAIL[k] for k in ("nickname", "contact_type", "contact")}]),
                422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
@@ -987,6 +953,7 @@ def suggest(q: str = Query("", openapi_examples={"nickname": api_examples.exampl
     "/api/settings",
     tags=["设置"],
     summary="读取联系方式和支付平台",
+    description=GUIDE_SECTIONS["GET /api/settings"],
     responses={200: json_example(api_examples.OPTIONS)},
     response_model=Settings,
 )
@@ -999,6 +966,7 @@ def settings():
     "/api/settings",
     tags=["设置"],
     summary="更新可选列表，第一项为默认值",
+    description=GUIDE_SECTIONS["PUT /api/settings"],
     response_model=Settings,
     responses=write_errors(),
 )
@@ -1031,18 +999,17 @@ class Statistics(BaseModel):
 @app.get(
     "/api/stats",
     tags=["统计"],
-    summary="队列与收入统计，按支付日期归集",
+    summary="查看排期和收入统计",
+    description=GUIDE_SECTIONS["GET /api/stats"],
     response_model=Statistics,
     responses={200: json_example(api_examples.STATS),
                422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
 )
-@documented('收入统计与甲方历史')
 def stats(
     months: int = Query(6, ge=1, le=120, description="仅改变 monthly，含上海本月"),
     all_time: bool = Query(False, description="仅改变 monthly，从首笔实收所在月至本月"),
     year: int | None = Query(None, ge=1, le=9999, description="仅改变 monthly，以自然年覆盖 months 和 all_time"),
 ):
-    """所有金额以元计，统计至上海今天，示例数据参与合计。月份筛选只改变 monthly，优先级为 year、all_time、months。历史年显示全年，本年截至本月，未来年为空。"""
     with database() as db:
         return income_stats(rows(db), months, all_time, year)
 
@@ -1127,7 +1094,8 @@ class SettingsPage(WorkspacePage):
 Workspace = Annotated[OverviewPage | QueuePage | ReceiptsPage | SettingsPage, Field(discriminator="page")]
 
 
-@app.get("/api/workspace", tags=["工作台"], summary="单次读取事务中的当前页面快照",
+@app.get("/api/workspace", tags=["工作台"], summary="读取一个页面需要的数据",
+    description=GUIDE_SECTIONS["GET /api/workspace"],
          response_model=Workspace, response_model_exclude_none=True,
     responses={200: json_example(api_examples.WORKSPACE),
                422: {"model": ErrorResponse, "description": "路径或查询参数校验失败"}},
@@ -1135,16 +1103,6 @@ Workspace = Annotated[OverviewPage | QueuePage | ReceiptsPage | SettingsPage, Fi
 def workspace(page: Literal["overview", "queue", "receipts", "settings"],
               months: int = Query(6, ge=1, le=120, description="仅改变 monthly，含上海本月"), all_time: bool = False,
               year: int | None = Query(None, ge=1, le=9999)):
-    """按 page 选择响应结构。所有页都返回 settings、count、has_samples。
-
-    | page | records | 其他数据 |
-    |---|---|---|
-    | overview | VersionedCommission，普通前 4 单 + 延期前 4 单，均未结稿 | stats |
-    | queue | Card，全部约稿含已结稿，附 history 和 agreed_total | |
-    | receipts | 空数组 | receipts 全部有日期的稿费 |
-    | settings | 空数组 | 配置 |
-
-    非 receipts 页的 receipts 为空；非 overview 页省略 stats。"""
     with database() as db:
         result = {"page": page, "settings": options(db), "records": [], "receipts": []}
         if page == "settings":
@@ -1169,12 +1127,12 @@ def workspace(page: Literal["overview", "queue", "receipts", "settings"],
     "/api/export",
     tags=["数据"],
     summary="导出完整 JSON 备份（含图片）",
+    description=GUIDE_SECTIONS["GET /api/export"],
     response_model=Snapshot,
     responses={200: {**json_example({"version": 1, "settings": api_examples.OPTIONS, "commissions": []}),
                      "headers": {"Content-Disposition": header_spec("attachment，文件名 commission-YYYY-MM-DD.json")}}},
     response_model_exclude_none=True,
 )
-@documented('备份、示例与删除')
 def export_data():
     def stream():
         with database(streaming=True) as db:
@@ -1228,10 +1186,10 @@ def download_text(content, extension, media_type):
     })
 
 
-@app.get("/api/export/csv", tags=["数据"], summary="下载约稿与收款 CSV，每笔收款一行，无收款约稿也保留一行",
+@app.get("/api/export/csv", tags=["数据"], summary="导出约稿和收款明细表",
+    description=GUIDE_SECTIONS["GET /api/export/csv"],
          response_class=Response, responses={200: {"headers": {"Content-Disposition": header_spec("commission-YYYY-MM-DD.csv")},
              "content": {"text/csv; charset=utf-8": {"schema": {"type": "string"}}}}})
-@documented('金额和财务导出')
 def export_csv():
     with database() as db:
         records = rows(db)
@@ -1255,9 +1213,9 @@ def ledger_string(value):
     return json.dumps(" ".join(value.splitlines()), ensure_ascii=False)
 
 
-@app.get("/api/export/beancount", tags=["数据"], summary="下载 CNY 双重记账账本，每笔收款对应一笔交易",
+@app.get("/api/export/beancount", tags=["数据"], summary="导出 Beancount 账本",
+    description=GUIDE_SECTIONS["GET /api/export/beancount"],
          response_class=PlainTextResponse, responses={200: {"headers": {"Content-Disposition": header_spec("commission-YYYY-MM-DD.beancount")}}})
-@documented('金额和财务导出')
 def export_beancount():
     entries = sorted(receipts(), key=lambda entry: entry["date"])
     first = entries[0]["date"] if entries else today().isoformat()
@@ -1277,15 +1235,12 @@ def export_beancount():
 @app.post(
     "/api/import",
     tags=["数据"],
-    summary="原子替换为完整备份，失败会回滚",
+    summary="从 JSON 备份恢复全部数据",
+    description=GUIDE_SECTIONS["POST /api/import"],
     status_code=204,
     responses=write_errors(images=True),
 )
-@documented('附件与备份边界', '幂等摘要')
 def import_data(snapshot: Annotated[Snapshot, Body(openapi_examples=api_examples.IMPORT)]):
-    """先用 GET /api/export 保存当前快照。无预演模式。导入在单个事务中替换设置、全部约稿、收款、图片及幂等记录。
-    备份内约稿 id 必填且唯一（1–80 位字母、数字、下划线或短横线）。与现库 ID 相同也按备份重建；
-    备份自身的重复约稿 ID 或同单重复 token 返回 422，修改回滚。"""
     ids = [r.id for r in snapshot.commissions]
     if len(ids) != len(set(ids)) or any(
         not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", i) for i in ids
@@ -1333,7 +1288,8 @@ def load_examples(db):
 @app.post(
     "/api/examples",
     tags=["数据"],
-    summary="添加示例约稿和收款，有示例时保持现状",
+    summary="加载示例约稿和收款",
+    description=GUIDE_SECTIONS["POST /api/examples"],
     status_code=204,
     responses=write_errors(validation=False),
 )
@@ -1346,7 +1302,8 @@ def add_examples():
 @app.delete(
     "/api/examples",
     tags=["数据"],
-    summary="仅清除标有示例的约稿及其收款",
+    summary="清除示例数据",
+    description=GUIDE_SECTIONS["DELETE /api/examples"],
     status_code=204,
     responses=write_errors(validation=False),
 )
