@@ -25,7 +25,7 @@ from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
-from pydantic import BaseModel, BeforeValidator, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, computed_field, field_validator, model_serializer
 from pypinyin import lazy_pinyin
 
 ROOT = Path(__file__).parent
@@ -69,11 +69,25 @@ class Settings(BaseModel):
 
 class Payment(BaseModel):
     amount: Decimal = Field(
-        gt=0, max_digits=14, decimal_places=2, description="实收人民币，最多两位小数"
+        gt=0, max_digits=14, decimal_places=2, description="人民币金额，最多两位小数"
     )
-    date: Day = Field(default_factory=today)
+    date: Day | None = Field(default_factory=today, description="null 或空字符串表示付款约定，省略字段沿用当天日期。")
     stage: str = "稿费"
     platform: str = Field("", description="留空使用设置中的首个收入平台")
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def allow_blank_date(cls, value):
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_serializer(mode="wrap")
+    def serialize_payment(self, handler):
+        data = handler(self)
+        # Preserve explicit null even on routes that omit other optional fields.
+        # Omitting this key on a later PUT would apply the legacy default (today).
+        if self.date is None:
+            data["date"] = None
+        return data
 
 
 class Attachment(BaseModel):
@@ -91,7 +105,6 @@ class Commission(BaseModel):
     title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
     requirements: str = ""
     is_priority: bool = Field(False, description="插队标记，插入队列时自动设置，可在编辑时更改")
-    brief_received: bool = False
     planned: Day | None = None
     started: Day | None = None
     status: Status = "未开始"
@@ -101,6 +114,7 @@ class Commission(BaseModel):
 
 
 class Saved(Commission):
+    brief_received: bool = Field(False, description="由需求说明或参考图自动判断")
     id: str
     sample: bool = False
 
@@ -122,8 +136,14 @@ class CommissionUpdate(Commission):
 class Card(VersionedCommission):
     history: ClientHistory
 
+    @computed_field
+    @property
+    def agreed_total(self) -> Decimal:
+        return sum((p.amount for p in self.payments if p.date is None), Decimal(0))
+
 
 class Receipt(Payment):
+    date: Day
     title: str = Field("", description="所属约稿的约稿内容（简短标题）")
     commission_id: str
     nickname: str
@@ -262,9 +282,19 @@ def options(db):
     return json.loads(db.execute("SELECT body FROM settings WHERE id=1").fetchone()[0])
 
 
+def commission_body(raw):
+    body = json.loads(raw)
+    body["brief_received"] = bool(body.get("requirements", "").strip() or body.get("attachments"))
+    return body
+
+
+def dated_payments(record):
+    return (p for p in record["payments"] if p.get("date"))
+
+
 def rows(db):
     return [
-        dict(json.loads(r["body"]), id=r["id"], revision=r["revision"])
+        dict(commission_body(r["body"]), id=r["id"], revision=r["revision"])
         for r in db.execute("SELECT * FROM jobs ORDER BY pos, rowid")
     ]
 
@@ -273,7 +303,7 @@ def lookup(db, key):
     row = db.execute("SELECT body,revision FROM jobs WHERE id=?", (key,)).fetchone()
     if not row:
         raise HTTPException(404, "约稿不存在")
-    return dict(json.loads(row["body"]), id=key, revision=row["revision"])
+    return dict(commission_body(row["body"]), id=key, revision=row["revision"])
 
 
 def active_keys(db, queue):
@@ -362,7 +392,7 @@ def new_image(db, job, img, restore=False):
 
 def save(db, key, item, restore=False, sample=False):
     config = options(db)
-    body = item.model_dump(mode="json", exclude={"attachments", "id", "revision", "payment_requests"})
+    body = item.model_dump(mode="json", exclude={"attachments", "brief_received", "id", "revision", "payment_requests"})
     body["sample"] = sample
     body["nickname"] = item.nickname.strip() or f"甲方 {key[:6].upper()}"
     body["contact_type"] = item.contact_type or config["contacts"][0]
@@ -424,7 +454,7 @@ def histories(records):
         )
         history = summaries[key]
         history.completed += int(r["status"] == "已结稿")
-        for payment in r["payments"]:
+        for payment in dated_payments(r):
             day = date.fromisoformat(payment["date"])
             if day <= cutoff:
                 history.total += Decimal(payment["amount"])
@@ -480,7 +510,7 @@ def receipt_rows(records):
             sample=r.get("sample", False),
         )
         for r in records
-        for p in r["payments"]
+        for p in dated_payments(r)
     ]
     return sorted(entries, key=lambda p: p["date"], reverse=True)
 
@@ -628,7 +658,7 @@ def resume_job(key: str):
 @app.post(
     "/api/commissions/{key}/payments",
     tags=["收款"],
-    summary="追加一笔实收稿费",
+    summary="追加一笔收款或无日期的付款约定",
     response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
@@ -811,7 +841,7 @@ def income_stats(records, months, all_time, year):
     ]
     deferred_count = sum(r.get("queue") == "deferred" and r["status"] != "已结稿" for r in records)
     for r in records:
-        for p in r["payments"]:
+        for p in dated_payments(r):
             day = date.fromisoformat(p["date"])
             if day <= now:
                 value = Decimal(p["amount"])
@@ -908,7 +938,7 @@ def export_data():
                             yield blobs[key]
                 images = image_data()
                 for row in batch:
-                    record = json.loads(row["body"])
+                    record = commission_body(row["body"])
                     refs = record.pop("attachments")
                     record["id"] = row["id"]
                     if requests[row["id"]]:
@@ -949,7 +979,7 @@ def export_csv():
     writer.writerow(["约稿ID", "甲方", "联系方式", "联系账号", "约稿内容", "需求说明", "队列", "状态",
                      "预计开始", "实际开始", "支付日期", "稿期阶段", "支付方式", "金额(CNY)"])
     for r in records:
-        for payment in r["payments"] or [{}]:
+        for payment in list(dated_payments(r)) or [{}]:
             cells = [r["id"], r["nickname"], r["contact_type"], r["contact"], r.get("title", ""),
                      r["requirements"], r.get("queue", "normal"), r["status"], r["planned"], r["started"],
                      payment.get("date"), payment.get("stage"), payment.get("platform"), payment.get("amount")]

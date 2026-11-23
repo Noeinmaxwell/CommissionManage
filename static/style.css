@@ -849,6 +849,11 @@ h3 {
   overflow-wrap: anywhere;
   text-align: left;
 }
+.queue-progress .agreed-total {
+  margin-inline-start: 8px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
 .queue-client .namebtn {
   color: var(--ink);
   font-size: 17px;

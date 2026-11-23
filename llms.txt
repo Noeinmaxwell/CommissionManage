@@ -6,6 +6,8 @@
 - [交互文档](/docs) 提供可执行示例。以下路径均相对于当前服务地址。写入 JSON 时使用 Content-Type: application/json。
 - 金额以人民币元计，最多两位小数。日期建议用 YYYY-MM-DD。收入按上海日期统计，未来收款在支付当天计入。
 
+付款约定使用 payments[].date=null，空字符串也按约定处理。省略 date 字段仍默认使用上海当天日期。约定仅保存在约稿和 JSON 备份中，队列卡片的 agreed_total 是该单未填日期的稿费合计。收到款项后通过 PUT 给原条目补填日期，避免重复追加。brief_received 由非空白 requirements 或 attachments 自动判断。
+
 应用 API 直接接受请求，无需登录凭据。
 
 ## 从查询到操作

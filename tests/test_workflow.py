@@ -190,6 +190,51 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(ledger.count(' * "=甲方"'), 6)
         self.assertIn("Income:Commissions  -60.00 CNY", ledger)
 
+    def test_undated_agreements_and_settlement(self):
+        record = self.api("/commissions", "POST", {
+            "nickname": "小林", "payments": [
+                {"date": "", "amount": "0.10"}, {"date": None, "amount": "0.20"},
+                {"date": today().isoformat(), "amount": "10.00"},
+            ],
+        })
+        path = "/commissions/" + record["id"]
+        self.assertIsNone(record["payments"][0]["date"])
+        record = self.api(path, "PUT", record)
+        self.assertIsNone(record["payments"][1]["date"])
+        backup = self.api("/export")
+        self.api("/import", "POST", backup)
+        self.assertEqual(self.api("/export"), backup)
+        def check(agreed, received, entries):
+            card = self.api("/workspace?page=queue")["records"][0]
+            self.assertEqual(Decimal(card["agreed_total"]), Decimal(agreed))
+            self.assertEqual(Decimal(card["history"]["total"]), Decimal(received))
+            self.assertEqual(self.api("/stats")["total"], float(received))
+            self.assertEqual(len(self.api("/payments")), entries)
+            self.assertEqual(len(self.api("/workspace?page=receipts")["receipts"]), entries)
+            self.assertEqual(len(list(csv.DictReader(StringIO(self.api("/export/csv").decode("utf-8-sig"))))), entries)
+            self.assertEqual(self.api("/export/beancount").decode().count(' * "小林"'), entries)
+        check("0.30", "10.00", 1)
+        record = self.api(path)
+        record["payments"][0]["date"] = today().isoformat()
+        self.api(path, "PUT", record)
+        check("0.20", "10.10", 2)
+
+    def test_brief_status_follows_description_or_attachment(self):
+        record = self.api("/commissions", "POST", {
+            "brief_received": True, "requirements": "  ", "title": "仅标题",
+        })
+        path = "/commissions/" + record["id"]
+        self.assertFalse(record["brief_received"])
+        record = self.api(path, "PUT", {**record, "requirements": "详细需求"})
+        self.assertTrue(record["brief_received"])
+        stream = BytesIO()
+        Image.new("RGB", (2, 2)).save(stream, format="PNG")
+        ref = {"name": "参考", "data": base64.b64encode(stream.getvalue()).decode()}
+        record = self.api(path, "PUT", {**record, "requirements": "", "attachments": [ref]})
+        self.assertTrue(self.api("/workspace?page=queue")["records"][0]["brief_received"])
+        record = self.api(path, "PUT", {**record, "attachments": []})
+        self.assertFalse(record["brief_received"])
+
     def test_concurrent_retry_and_stale_update(self):
         order = self.api("/commissions", "POST", {"nickname": "小林"})
         path = "/commissions/" + order["id"]
