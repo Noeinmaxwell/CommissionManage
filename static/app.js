@@ -332,7 +332,7 @@ function queueList() {
         </div>
         <div class="queue-schedule">
           <div class="queue-value"><span>预计开始</span><b>${esc(r.planned || "待定")}</b></div>
-          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span></div>
+          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span>${Number(r.agreed_total) > 0 ? `<span class="agreed-total">约定 ¥${money(r.agreed_total)}</span>` : ""}</div>
         </div>
         <div class="client-history">
           <div class="queue-value"><span>累计收款</span><b>¥${money(r.history.total)}</b></div>
@@ -377,7 +377,7 @@ async function openCommissionDetail(key) {
     <dl class="detail-fields">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value || "—")}</dd></div>`).join("")}</dl></section>
     <section><h3>${esc(r.title || "约稿需求")}</h3><p class="detail-brief">${esc(r.requirements || "暂无详细需求")}</p>
     ${r.attachments.length ? `<div class="thumbs">${r.attachments.map((attachment, i) => `<div class="thumb">${thumbnailButton(attachment, i)}</div>`).join("")}</div>` : ""}</section>
-    <section><h3>本单收款</h3>${r.payments.length ? r.payments.map(p => `<div class="detail-payment"><time>${esc(p.date)}</time><span>${esc(p.stage)} · ${esc(p.platform)}</span><b>¥${money(p.amount)}</b></div>`).join("") : "暂无收款记录"}</section></div>
+    <section><h3>本单稿费</h3>${r.payments.length ? r.payments.map(p => `<div class="detail-payment">${p.date ? `<time>${esc(p.date)}</time>` : "<span>付款约定</span>"}<span>${esc(p.stage)} · ${esc(p.platform)}</span><b>¥${money(p.amount)}</b></div>`).join("") : "暂无稿费"}</section></div>
     <div class="dialog-foot"><button class="btn" data-action="edit">编辑约稿</button></div>`;
   hideChartTip();
   dialog.showModal();
@@ -524,7 +524,7 @@ function setupStageMenu(row) {
 function paymentRow(p = {}) {
   const el = document.createElement("div");
   el.className = "payment";
-  el.innerHTML = `<label class="field-label">金额（元）<input class="control" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" value="${esc(p.amount)}" required></label><div class="field-label stage-field"><label>稿期阶段<input class="control" name="stage" role="combobox" aria-expanded="false" aria-autocomplete="list" autocomplete="off" placeholder="稿费" value="${esc(p.stage)}"></label><div class="stage-menu" role="listbox" aria-label="稿期阶段推荐" hidden></div></div>${dateField("paydate", "支付日期", p.date || localDay())}<label class="field-label">支付方式<select class="control" name="platform">${choices(state.settings.platforms, p.platform)}</select></label><button class="iconbtn" type="button" data-action="remove-payment" aria-label="移除此笔稿费">${icon("x")}</button>`;
+  el.innerHTML = `<label class="field-label">金额（元）<input class="control" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" value="${esc(p.amount)}" required></label><div class="field-label stage-field"><label>稿期阶段<input class="control" name="stage" role="combobox" aria-expanded="false" aria-autocomplete="list" autocomplete="off" placeholder="稿费" value="${esc(p.stage)}"></label><div class="stage-menu" role="listbox" aria-label="稿期阶段推荐" hidden></div></div>${dateField("paydate", "支付日期", p.date || "")}<label class="field-label">支付方式<select class="control" name="platform">${choices(state.settings.platforms, p.platform)}</select></label><button class="iconbtn" type="button" data-action="remove-payment" aria-label="移除此笔稿费">${icon("x")}</button>`;
   setupStageMenu(el);
   return el;
 }
@@ -541,8 +541,8 @@ function openEditor(key = null, before = null) {
   busy = false;
   $("#commissionForm").innerHTML =
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
- <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label>${key ? `<label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority ? "checked" : ""}>插队</label>` : ""}</div></section>
- <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div></section>
+ <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority || before ? "checked" : ""} ${before ? "disabled" : ""}>插队</label></div></section>
+ <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><p class="helper">支付日期留空时保存为付款约定，收到款项后补填日期。</p><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="btn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
   (r.payments || []).forEach((p) => $("#payments").append(paymentRow(p)));
@@ -614,7 +614,7 @@ async function submitRecord(e) {
     return {
       amount: val("amount"),
       stage: val("stage") || "稿费",
-      date: normalizeDay(val("paydate")) || localDay(),
+      date: normalizeDay(val("paydate")) || null,
       platform: val("platform"),
     };
   });
@@ -622,7 +622,7 @@ async function submitRecord(e) {
     ...(!editing && state.page === "queue" && state.lane === "deferred"
       ? { queue: "deferred" }
       : {}),
-    ...(editing ? { revision: editingRevision, is_priority: f.is_priority.checked } : {}),
+    ...(editing ? { revision: editingRevision } : {}),
     nickname: f.nickname.value,
     contact_type: f.contact_type.value,
     contact: f.contact.value,
@@ -631,7 +631,7 @@ async function submitRecord(e) {
     status: f.status.value,
     title: f.brief_title.value.trim(),
     requirements: f.requirements.value,
-    brief_received: f.brief_received.checked,
+    is_priority: f.is_priority.checked,
     payments,
     attachments,
   };
@@ -949,7 +949,7 @@ document.addEventListener("change", async (e) => {
 document.addEventListener("focusout", (e) => {
   if (e.target.matches(".day")) {
     const s = normalizeDay(e.target.value);
-    if (s) {
+    if (s !== null) {
       e.target.value = s;
       const wrap = e.target.closest(".field-label");
       wrap.querySelector("input[type=date]").value = s;
