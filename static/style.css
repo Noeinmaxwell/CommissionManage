@@ -773,8 +773,8 @@ h3 {
 }
 .queue-card.search-match,
 .tabs button.lane-match {
-  border-color: #d7ae4c;
-  background: #fff4c8;
+  border-color: #ead36b;
+  background: #fff8b8;
 }
 .tabs button.lane-match {
   color: #714f05;
@@ -1633,7 +1633,8 @@ main > * {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-.sample-tag {
+.sample-tag,
+.priority-tag {
   display: inline-block;
   padding: 1px 5px;
   border: 1px solid #dce4ef;
@@ -1643,6 +1644,11 @@ main > * {
   font-weight: 500;
   vertical-align: middle;
   white-space: nowrap;
+}
+.priority-tag {
+  color: #825322;
+  background: #fff4df;
+  border-color: #e9cf9f;
 }
 .ledger-wrap {
   overflow-x: auto;
@@ -1799,3 +1805,17 @@ button.metric:hover { border-color: #b7caef; }
 }
 .stage-menu [role="option"]:hover,
 .stage-menu [aria-selected="true"] { background: var(--pale); }
+
+.queue-previews {
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(0, 1fr);
+  gap: 18px;
+}
+.preview-scroll { overflow-x: auto; }
+.queue-previews th, .preview-date { white-space: nowrap; }
+.queue-previews td, .queue-previews .namebtn { overflow-wrap: anywhere; }
+.preview-deferred .compact-table td:first-child { width: 43%; }
+.hero-stats .deferred-count b { color: #244b7c; }
+@media (max-width: 950px) {
+  .queue-previews { grid-template-columns: minmax(0, 1fr); }
+}

@@ -2,6 +2,9 @@
 
 import base64
 import binascii
+import hashlib
+import ipaddress
+import secrets
 import csv
 import json
 import os
@@ -19,9 +22,9 @@ from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
@@ -89,6 +92,7 @@ class Commission(BaseModel):
     contact: str = ""
     title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
     requirements: str = ""
+    is_priority: bool = Field(False, description="插队标记，插入队列时自动设置，可在编辑时更改")
     brief_received: bool = False
     planned: Day | None = None
     started: Day | None = None
@@ -109,7 +113,15 @@ class ClientHistory(BaseModel):
     latest: date | None = None
 
 
-class Card(Saved):
+class VersionedCommission(Saved):
+    revision: str
+
+
+class CommissionUpdate(Commission):
+    revision: str = Field(description="读取约稿时返回的版本。过期时返回 409。")
+
+
+class Card(VersionedCommission):
     history: ClientHistory
 
 
@@ -117,13 +129,23 @@ class Receipt(Payment):
     title: str = Field("", description="所属约稿的约稿内容（简短标题）")
     commission_id: str
     nickname: str
+    is_priority: bool = False
     sample: bool
+
+
+class PaymentRequest(BaseModel):
+    token: str = Field(min_length=1, max_length=128, pattern=r"^[!-~]+$")
+    digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class BackupCommission(Saved):
+    payment_requests: list[PaymentRequest] = Field(default_factory=list)
 
 
 class Snapshot(BaseModel):
     version: Literal[1]
     settings: Settings
-    commissions: list[Saved] = Field(description="依照队列顺序排列，含历史记录及图片")
+    commissions: list[BackupCommission] = Field(description="依照队列顺序排列，含历史记录及图片")
 
 
 class Movement(BaseModel):
@@ -131,8 +153,8 @@ class Movement(BaseModel):
 
 
 @contextmanager
-def database(write=False):
-    connection = sqlite3.connect(DB, timeout=15)
+def database(write=False, *, streaming=False):
+    connection = sqlite3.connect(DB, timeout=15, check_same_thread=not streaming)
     connection.row_factory = sqlite3.Row
     try:
         connection.execute("PRAGMA foreign_keys=ON")
@@ -141,6 +163,33 @@ def database(write=False):
         connection.commit()
     finally:
         connection.close()
+
+
+def normalize_attachment_refs(db):
+    affected = db.execute("""
+        SELECT id,body FROM jobs WHERE EXISTS (
+            SELECT 1 FROM json_each(jobs.body, '$.attachments')
+            GROUP BY json_extract(value, '$.id') HAVING count(*) > 1
+        )""").fetchall()
+    for job in affected:
+        body = json.loads(job["body"])
+        seen, names, refs = set(), set(), []
+        for ref in body["attachments"]:
+            original = ref["id"]
+            label = (original, ref["name"])
+            if label in names:
+                continue
+            names.add(label)
+            if original in seen:
+                alias = uuid4().hex
+                db.execute("""INSERT INTO images(id,job,mime,bytes,thumbnail)
+                              SELECT ?,job,mime,bytes,thumbnail FROM images WHERE job=? AND id=?""",
+                           (alias, job["id"], original))
+                ref = {**ref, "id": alias}
+            seen.add(original)
+            refs.append(ref)
+        body["attachments"] = refs
+        db.execute("UPDATE jobs SET body=? WHERE id=?", (json.dumps(body, ensure_ascii=False), job["id"]))
 
 
 @asynccontextmanager
@@ -154,6 +203,16 @@ async def lifespan(_):
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
         """)
         db.execute("BEGIN IMMEDIATE")
+        db.execute("""CREATE TABLE IF NOT EXISTS payment_requests(
+            job TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE, token TEXT NOT NULL,
+            digest TEXT NOT NULL, PRIMARY KEY(job,token))""")
+        if "revision" not in {r["name"] for r in db.execute("PRAGMA table_info(jobs)")}:
+            db.execute("ALTER TABLE jobs ADD COLUMN revision TEXT NOT NULL DEFAULT ''")
+            db.execute("UPDATE jobs SET revision=lower(hex(randomblob(16)))")
+        db.execute("""CREATE TRIGGER IF NOT EXISTS jobs_revision AFTER UPDATE OF body ON jobs
+                      WHEN OLD.body != NEW.body BEGIN
+                        UPDATE jobs SET revision=lower(hex(randomblob(16))) WHERE id=NEW.id;
+                      END""")
         if "thumbnail" not in {
             r["name"] for r in db.execute("PRAGMA table_info(images)")
         }:
@@ -165,7 +224,9 @@ async def lifespan(_):
         if db.execute("PRAGMA user_version").fetchone()[0] == 0:
             if not db.execute("SELECT 1 FROM jobs LIMIT 1").fetchone():
                 load_examples(db)
-            db.execute("PRAGMA user_version=1")
+        if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            normalize_attachment_refs(db)
+            db.execute("PRAGMA user_version=2")
     yield
 
 
@@ -179,8 +240,47 @@ app = FastAPI(
 )
 
 
+def local_request(request):
+    if not request.client or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return False
+    try:
+        return ipaddress.ip_address(request.client.host).is_loopback
+    except ValueError:
+        return False
+
+
+def access_role(request):
+    admin = os.environ.get("COMMISSION_ADMIN_PASSWORD")
+    viewer = os.environ.get("COMMISSION_VIEWER_PASSWORD")
+    if not admin and not viewer and local_request(request):
+        return "admin"
+    scheme, _, token = request.headers.get("authorization", "").partition(" ")
+    if scheme.lower() == "basic":
+        try:
+            username, _, password = base64.b64decode(token, validate=True).partition(b":")
+        except (ValueError, binascii.Error):
+            return None
+        for login, secret in (("admin", admin), ("viewer", viewer)):
+            if secret and username == login.encode() and secrets.compare_digest(password, secret.encode()):
+                return login
+    return None
+
+
+@app.get("/healthz", include_in_schema=False)
+def health():
+    return {"status": "ok"}
+
+
 @app.middleware("http")
-async def same_origin_writes(request: Request, call_next):
+async def authorize_request(request: Request, call_next):
+    if request.url.path != "/healthz":
+        role = access_role(request)
+        if not role:
+            return JSONResponse({"detail": "需要登录"}, status_code=401,
+                                headers={"WWW-Authenticate": 'Basic realm="CommissionManage", charset="UTF-8"'})
+        if role != "admin" and (request.method not in ("GET", "HEAD", "OPTIONS")
+                                or request.url.path.rstrip("/").startswith("/api/export")):
+            return JSONResponse({"detail": "此操作需要管理员权限"}, status_code=403)
     origin = request.headers.get("origin")
     if (
         request.method not in ("GET", "HEAD", "OPTIONS")
@@ -188,7 +288,10 @@ async def same_origin_writes(request: Request, call_next):
         and origin != str(request.base_url).rstrip("/")
     ):
         return JSONResponse({"detail": "来源与服务地址不一致"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "private, no-store"
+    return response
 
 
 def options(db):
@@ -197,16 +300,16 @@ def options(db):
 
 def rows(db):
     return [
-        dict(json.loads(r["body"]), id=r["id"])
+        dict(json.loads(r["body"]), id=r["id"], revision=r["revision"])
         for r in db.execute("SELECT * FROM jobs ORDER BY pos, rowid")
     ]
 
 
 def lookup(db, key):
-    row = db.execute("SELECT body FROM jobs WHERE id=?", (key,)).fetchone()
+    row = db.execute("SELECT body,revision FROM jobs WHERE id=?", (key,)).fetchone()
     if not row:
         raise HTTPException(404, "约稿不存在")
-    return dict(json.loads(row[0]), id=key)
+    return dict(json.loads(row["body"]), id=key, revision=row["revision"])
 
 
 def active_keys(db, queue):
@@ -295,7 +398,7 @@ def new_image(db, job, img, restore=False):
 
 def save(db, key, item, restore=False, sample=False):
     config = options(db)
-    body = item.model_dump(mode="json", exclude={"attachments", "id"})
+    body = item.model_dump(mode="json", exclude={"attachments", "id", "revision", "payment_requests"})
     body["sample"] = sample
     body["nickname"] = item.nickname.strip() or f"甲方 {key[:6].upper()}"
     body["contact_type"] = item.contact_type or config["contacts"][0]
@@ -303,12 +406,23 @@ def save(db, key, item, restore=False, sample=False):
         p["platform"] = p["platform"] or config["platforms"][0]
         p["stage"] = p["stage"].strip() or "稿费"
     db.execute(
-        "INSERT OR IGNORE INTO jobs SELECT ?, COALESCE(MAX(pos),-1)+1, '{}' FROM jobs",
+        "INSERT OR IGNORE INTO jobs(id,pos,body) SELECT ?, COALESCE(MAX(pos),-1)+1, '{}' FROM jobs",
         (key,),
     )
     existing = {r[0] for r in db.execute("SELECT id FROM images WHERE job=?", (key,))}
     refs = []
+    seen = {}
     for img in item.attachments:
+        if img.id and img.id in seen:
+            original = seen[img.id]
+            if not restore or not img.data or original.data != img.data:
+                raise HTTPException(422, "同一约稿包含重复的附件 ID")
+            if img.name == original.name:
+                continue
+            # Preserve a differently named alias from a legacy snapshot as a distinct attachment.
+            img = img.model_copy(update={"id": None})
+        if img.id:
+            seen[img.id] = img
         if img.data is not None:
             image_id = new_image(db, key, img, restore)
         elif img.id in existing:
@@ -322,7 +436,7 @@ def save(db, key, item, restore=False, sample=False):
     db.execute(
         "UPDATE jobs SET body=? WHERE id=?", (json.dumps(body, ensure_ascii=False), key)
     )
-    return dict(body, id=key)
+    return lookup(db, key)
 
 
 def histories(records):
@@ -364,6 +478,10 @@ def histories(records):
 def list_commissions(status: Status | None = None, queue: Queue | None = None):
     with database() as db:
         records = rows(db)
+    return commission_cards(records, status, queue)
+
+
+def commission_cards(records, status=None, queue=None):
     history = histories(records)
     return [
         dict(x, history=history[x["id"]])
@@ -384,17 +502,22 @@ def list_commissions(status: Status | None = None, queue: Queue | None = None):
 )
 def receipts():
     with database() as db:
-        entries = [
-            dict(
-                p,
-                commission_id=r["id"],
-                title=r.get("title", ""),
-                nickname=r["nickname"],
-                sample=r.get("sample", False),
-            )
-            for r in rows(db)
-            for p in r["payments"]
-        ]
+        return receipt_rows(rows(db))
+
+
+def receipt_rows(records):
+    entries = [
+        dict(
+            p,
+            commission_id=r["id"],
+            title=r.get("title", ""),
+            is_priority=r.get("is_priority", False),
+            nickname=r["nickname"],
+            sample=r.get("sample", False),
+        )
+        for r in records
+        for p in r["payments"]
+    ]
     return sorted(entries, key=lambda p: p["date"], reverse=True)
 
 
@@ -403,7 +526,7 @@ def receipts():
     tags=["约稿"],
     summary="新建约稿，可插入指定位置",
     status_code=201,
-    response_model=Saved,
+    response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
 def create(
@@ -415,9 +538,12 @@ def create(
     """返回 201 和新约稿的 id。before 是同一队列中的约稿 ID，省略时排至队尾。重复提交会创建多条约稿。"""
     with database(True) as db:
         key = uuid4().hex
+        insert_before = before if item.status != "已结稿" else None
+        if insert_before:
+            item.is_priority = True
         saved = save(db, key, item)
-        if before and item.status != "已结稿":
-            move(db, key, before, item.queue)
+        if insert_before:
+            move(db, key, insert_before, item.queue)
         return saved
 
 
@@ -425,7 +551,7 @@ def create(
     "/api/commissions/{key}",
     tags=["约稿"],
     summary="读取约稿详情",
-    response_model=Saved,
+    response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
 def detail(key: str):
@@ -437,15 +563,19 @@ def detail(key: str):
     "/api/commissions/{key}",
     tags=["约稿"],
     summary="完整更新约稿，推迟预计开始日期会进入延期队列",
-    response_model=Saved,
+    response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
-def update(key: str, item: Commission):
+def update(key: str, item: CommissionUpdate):
     """先 GET 详情再修改字段并回传。保留完整 payments 数组及 attachments 中已有的 id，省略这些列表会清空相应数据。状态变更和追加收款优先使用专用接口。"""
     with database(True) as db:
         previous = lookup(db, key)
+        if previous["revision"] != item.revision:
+            raise HTTPException(409, "约稿已被其他操作更新，请重新打开编辑窗口后再保存")
         if "title" not in item.model_fields_set:
             item.title = previous.get("title", "")
+        if "is_priority" not in item.model_fields_set:
+            item.is_priority = previous.get("is_priority", False)
         original = previous.get("queue", "normal")
         if "queue" not in item.model_fields_set:
             item.queue = original
@@ -535,7 +665,7 @@ def resume_job(key: str):
     "/api/commissions/{key}/payments",
     tags=["收款"],
     summary="追加一笔实收稿费",
-    response_model=Saved,
+    response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
 def pay(
@@ -543,10 +673,22 @@ def pay(
     payment: Annotated[Payment, Body(openapi_examples={
         "deposit": {"summary": "收取定金", "value": {"amount": "360.00", "stage": "定金", "date": "2026-02-28"}}
     })],
+    idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ):
-    """追加一笔人民币收款并返回更新后的约稿。重复提交会重复入账。"""
+    """追加一笔人民币收款并返回更新后的约稿。重试时使用同一 Idempotency-Key 和请求体。"""
     with database(True) as db:
         previous = lookup(db, key)
+        # Omitted date/platform defaults may change between attempts.
+        payload = payment.model_dump(mode="json", exclude_unset=True)
+        payload["amount"] = str(payment.amount.normalize())
+        digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        replay = db.execute("SELECT digest FROM payment_requests WHERE job=? AND token=?",
+                            (key, idempotency_key)).fetchone()
+        if replay:
+            if replay["digest"] != digest:
+                raise HTTPException(409, "幂等键已用于其他收款内容")
+            return previous
+        db.execute("INSERT INTO payment_requests VALUES(?,?,?)", (key, idempotency_key, digest))
         item = Commission.model_validate(previous)
         item.payments.append(payment)
         return save(db, key, item, sample=previous.get("sample", False))
@@ -629,8 +771,9 @@ def suggest(q: str = ""):
         found = {}
         for r in db.execute("SELECT body FROM jobs ORDER BY rowid DESC"):
             x = json.loads(r[0])
-            if x["nickname"] not in found and matches(x["nickname"], q.strip()):
-                found[x["nickname"]] = x
+            identity = (x["nickname"], x["contact_type"], x["contact"])
+            if identity not in found and matches(x["nickname"], q.strip()):
+                found[identity] = x
             if len(found) >= 8:
                 break
         return list(found.values())
@@ -668,6 +811,7 @@ class Statistics(BaseModel):
     periods: dict[int, PeriodIncome] = Field(description="3、6、12 个自然月的收入与月均，含本月，零收入月参与平均")
 
     count: int
+    deferred_count: int = Field(description="延期等待队列中尚未结稿的约稿数量")
     until: date | None
     total: float
     average: float
@@ -688,16 +832,20 @@ def stats(
     all_time: bool = Query(False, description="从首笔实收所在月起显示至本月"),
     year: int | None = Query(None, ge=1, le=9999, description="选择自然年查看历史收入"),
 ):
+    with database() as db:
+        return income_stats(rows(db), months, all_time, year)
+
+
+def income_stats(records, months, all_time, year):
     now = today()
     current = now.year * 12 + now.month - 1
     totals, sources = defaultdict(Decimal), defaultdict(Decimal)
-    with database() as db:
-        records = rows(db)
     active = [
         r
         for r in records
         if r["status"] != "已结稿" and r.get("queue", "normal") == "normal"
     ]
+    deferred_count = sum(r.get("queue") == "deferred" and r["status"] != "已结稿" for r in records)
     for r in records:
         for p in r["payments"]:
             day = date.fromisoformat(p["date"])
@@ -719,6 +867,7 @@ def stats(
     return {
         "periods": periods,
         "count": len(active),
+        "deferred_count": deferred_count,
         "until": max((r["planned"] for r in active if r["planned"]), default=None),
         "total": total,
         "average": round(total / span, 2),
@@ -731,6 +880,41 @@ def stats(
     }
 
 
+class Workspace(BaseModel):
+    page: Literal["overview", "queue", "receipts", "settings"]
+    settings: Settings
+    count: int
+    has_samples: bool
+    records: list[Card | VersionedCommission] = Field(default_factory=list)
+    receipts: list[Receipt] = Field(default_factory=list)
+    stats: Statistics | None = None
+
+
+@app.get("/api/workspace", tags=["工作台"], summary="单次读取事务中的当前页面快照",
+         response_model=Workspace, response_model_exclude_none=True)
+def workspace(page: Literal["overview", "queue", "receipts", "settings"],
+              months: int = Query(6, ge=1, le=120), all_time: bool = False,
+              year: int | None = Query(None, ge=1, le=9999)):
+    with database() as db:
+        result = {"page": page, "settings": options(db)}
+        if page == "settings":
+            result["count"] = len(active_keys(db, "normal"))
+            result["has_samples"] = bool(db.execute(
+                "SELECT 1 FROM jobs WHERE json_extract(body,'$.sample')=1 LIMIT 1").fetchone())
+            return result
+        records = rows(db)
+    normal = [r for r in records if r["status"] != "已结稿" and r.get("queue", "normal") == "normal"]
+    result.update(count=len(normal), has_samples=any(r.get("sample") for r in records))
+    if page == "overview":
+        deferred = [r for r in records if r["status"] != "已结稿" and r.get("queue") == "deferred"]
+        result.update(records=normal[:4] + deferred[:4], stats=income_stats(records, months, all_time, year))
+    elif page == "queue":
+        result["records"] = commission_cards(records)
+    else:
+        result["receipts"] = receipt_rows(records)
+    return result
+
+
 @app.get(
     "/api/export",
     tags=["数据"],
@@ -738,19 +922,50 @@ def stats(
     response_model=Snapshot,
     response_model_exclude_none=True,
 )
-def export_data(response: Response):
-    with database() as db:
-        records = rows(db)
-        for r in records:
-            for a in r["attachments"]:
-                data = db.execute(
-                    "SELECT bytes FROM images WHERE id=?", (a["id"],)
-                ).fetchone()[0]
-                a["data"] = base64.b64encode(data).decode()
-        response.headers["Content-Disposition"] = (
-            f'attachment; filename="commission-{today()}.json"'
-        )
-        return {"version": 1, "settings": options(db), "commissions": records}
+def export_data():
+    def stream():
+        with database(streaming=True) as db:
+            yield '{"version":1,"settings":' + json.dumps(options(db)) + ',"commissions":['
+            jobs = db.execute("SELECT id,body FROM jobs ORDER BY pos,rowid")
+            first = True
+            while batch := jobs.fetchmany(32):
+                ids = [row["id"] for row in batch]
+                slots = ",".join("?" for _ in ids)
+                requests = defaultdict(list)
+                for req in db.execute(f"SELECT job,token,digest FROM payment_requests WHERE job IN ({slots})", ids):
+                    requests[req["job"]].append({"token": req["token"], "digest": req["digest"]})
+                def image_data():
+                    refs = [ref["id"] for row in batch for ref in json.loads(row["body"])["attachments"]]
+                    for start in range(0, len(refs), 4):
+                        keys = refs[start:start + 4]
+                        params = ",".join("?" for _ in keys)
+                        blobs = dict(db.execute(f"SELECT id,bytes FROM images WHERE id IN ({params})", keys))
+                        for key in keys:
+                            yield blobs[key]
+                images = image_data()
+                for row in batch:
+                    record = json.loads(row["body"])
+                    refs = record.pop("attachments")
+                    record["id"] = row["id"]
+                    if requests[row["id"]]:
+                        record["payment_requests"] = requests[row["id"]]
+                    if not first:
+                        yield ","
+                    first = False
+                    yield json.dumps(record, ensure_ascii=False)[:-1] + ',"attachments":['
+                    for i, ref in enumerate(refs):
+                        if i:
+                            yield ","
+                        yield json.dumps(ref, ensure_ascii=False)[:-1] + ',"data":"'
+                        data = next(images)
+                        for start in range(0, len(data), 48 * 1024):
+                            yield base64.b64encode(data[start:start + 48 * 1024])
+                        yield '"}'
+                    yield "]}"
+            yield "]}"
+
+    return StreamingResponse(stream(), media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="commission-{today()}.json"' })
 
 
 def download_text(content, extension, media_type):
@@ -823,6 +1038,10 @@ def import_data(snapshot: Snapshot):
         )
         for item in snapshot.commissions:
             save(db, item.id, item, restore=True, sample=item.sample)
+            if len({r.token for r in item.payment_requests}) != len(item.payment_requests):
+                raise HTTPException(422, "备份包含重复的收款幂等键")
+            db.executemany("INSERT INTO payment_requests VALUES(?,?,?)",
+                           ((item.id, r.token, r.digest) for r in item.payment_requests))
     return Response(status_code=204)
 
 

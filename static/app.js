@@ -75,6 +75,7 @@ const state = {
 let loadId = 0,
   toastTimer,
   editing = null,
+  editingRevision = null,
   insertBefore = null,
   attachments = [],
   suggestTimer,
@@ -93,8 +94,10 @@ function queueRecords(lane = "normal") {
       : r.status !== "已结稿" && r.queue === lane,
   );
 }
-function sampleTag(record) {
-  return record.sample ? '<span class="sample-tag">示例</span>' : "";
+function commissionTags(record) {
+  const sample = record.sample ? '<span class="sample-tag">示例</span>' : "";
+  const priority = record.is_priority ? '<span class="priority-tag">插队</span>' : "";
+  return [sample, priority].filter(Boolean).join(" ");
 }
 
 function toast(msg) {
@@ -110,7 +113,7 @@ async function api(path, method = "GET", data) {
   const response = await fetch("/api" + path, {
     method,
     headers: data === undefined ? {} : { "Content-Type": "application/json" },
-    body: data === undefined ? undefined : JSON.stringify(data),
+    body: data instanceof File ? data : data === undefined ? undefined : JSON.stringify(data),
   });
   if (!response.ok) {
     let msg = "请求失败，请重试";
@@ -120,24 +123,24 @@ async function api(path, method = "GET", data) {
         ? detail.map((e) => `${e.loc.slice(1).join(".")} ${e.msg}`).join("，")
         : detail || msg;
     } catch {}
-    throw Error(msg);
+    throw Object.assign(Error(msg), {status: response.status});
   }
   return response.status === 204 ? null : response.json();
 }
 async function refresh() {
   const id = ++loadId;
-  const [records, settings, receipts, stats] = await Promise.all([
-    api("/commissions"),
-    api("/settings"),
-    api("/payments"),
-    api(
-      state.year
-        ? `/stats?year=${state.year}`
-        : state.months === "all" ? "/stats?all_time=true" : `/stats?months=${state.months}`,
-    ),
-  ]);
+  const requested = location.hash.slice(1);
+  const page = ["overview", "queue", "receipts", "settings"].includes(requested) ? requested : "overview";
+  const query = new URLSearchParams({page});
+  if (page === "overview") {
+    if (state.year) query.set("year", state.year);
+    else if (state.months === "all") query.set("all_time", "true");
+    else query.set("months", state.months);
+  }
+  const snapshot = await api("/workspace?" + query);
   if (id !== loadId) return;
-  Object.assign(state, { records, settings, receipts, stats });
+  $("#main").removeAttribute("aria-busy");
+  Object.assign(state, {stats: null}, snapshot);
   render();
 }
 function button(label, action, ico = "", primary = false) {
@@ -252,14 +255,29 @@ window.addEventListener("blur", hideChartTip);
 function empty(text, create = false) {
   return `<div class="empty"><span class="tile">${icon("queue")}</span><strong>${text}</strong>${create ? button("新建约稿", "new", "plus") : ""}</div>`;
 }
+function queuePreview(lane) {
+  const deferred = lane === "deferred";
+  const records = queueRecords(lane);
+  const heading = deferred ? "延期预览" : "排队预览";
+  const columns = deferred ? ["甲方昵称", "约稿内容"] : ["顺位", "甲方", "约稿内容", "预计开始", "结稿状态"];
+  const rows = records.map((record, index) => {
+    const nickname = `<button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(record.nickname)}</button>`;
+    return `<tr data-action="detail" data-key="${esc(record.id)}">
+      ${deferred ? "" : `<td>${String(index + 1).padStart(2, "0")}</td>`}
+      <td>${nickname}${deferred ? "" : commissionTags(record)}</td><td>${esc(record.title || "—")}</td>
+      ${deferred ? "" : `<td class="preview-date">${esc(record.planned || "待定")}</td><td>${statusTag(record.status)}</td>`}</tr>`;
+  }).join("");
+  return `<section class="card preview-${lane}"><div class="card-head"><h2>${icon(deferred ? "calendar" : "queue")}${heading}</h2>
+    <a href="#queue" data-action="open-lane" data-lane="${lane}" class="linkbtn" aria-label="查看全部${queueNames[lane]}约稿">查看全部 ${icon("arrow")}</a></div>
+    ${rows ? `<div class="preview-scroll"><table class="compact-table" aria-label="${heading}"><thead><tr>${columns.map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : empty(deferred ? "暂无延期约稿" : "暂无排队中的约稿", !deferred)}</section>`;
+}
 function overview() {
-  const s = state.stats,
-    records = queueRecords().slice(0, 4);
+  const s = state.stats;
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
-    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("total")}${metric("average")}</div></div>
+    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong><span class="deferred-count">延期中的甲方 <b>${s.deferred_count}</b> 位</span></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("total")}${metric("average")}</div></div>
  <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}<option value="all" ${!state.year && state.months === "all" ? "selected" : ""}>全部时间</option>${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
- <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-action="detail" data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
+ <div class="queue-previews">${queuePreview("normal")}${queuePreview("deferred")}</div>`
   );
 }
 function briefDetails(record) {
@@ -288,18 +306,18 @@ function queueList() {
   const list = queueRecords(state.lane);
   const archived = state.lane === "archived";
   const q = state.query.trim().toLowerCase();
-  const matches = state.showUnmatched ? list : list.filter(r => matchesQuery(r, q));
+  const matches = list.map((r, i) => ({r, i, hit: !!q && matchesQuery(r, q)}))
+    .filter(({hit}) => !q || state.showUnmatched || hit);
   if (!matches.length)
     return `<div class="card">${empty(q ? "没有匹配的约稿" : archived ? "暂无已结稿记录" : state.lane === "deferred" ? "暂无延期约稿" : "暂无排队中的约稿", !q && !archived)}</div>`;
   return matches
-    .map((r, index) => {
-      const i = list.indexOf(r),
-        drag = !archived && !q;
+    .map(({r, i, hit}, index) => {
+      const drag = !archived && !q;
       const detail = briefDetails(r);
       const contact = r.contact
         ? `${esc(r.contact_type)} · ${esc(r.contact)}`
         : "未填写联系方式";
-      return `<article class="queue-card${q && state.showUnmatched && matchesQuery(r,q) ? " search-match" : ""}" data-key="${r.id}">
+      return `<article class="queue-card${state.showUnmatched && hit ? " search-match" : ""}" data-key="${r.id}">
         <div class="queue-rank">
           ${drag ? `<button class="grip" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
           <span class="pos">${String(i + 1).padStart(2, "0")}</span>
@@ -307,7 +325,7 @@ function queueList() {
         <div class="queue-project">
           <div class="queue-client">
             <button class="namebtn" data-action="edit">${esc(r.nickname)}</button>
-            ${sampleTag(r)}
+            ${commissionTags(r)}
           </div>
           ${detail ? `<button class="project-title" data-action="brief" aria-expanded="false" aria-controls="brief-${esc(r.id)}">${esc(r.title?.trim() || "查看约稿需求")}</button>` : ""}
           <span class="queue-contact">${contact}</span>
@@ -336,9 +354,16 @@ function queue() {
     `<div class="toolbar"><div class="tabs">${queueTabs()}</div><div class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称、账号或约稿" aria-label="搜索昵称、账号或约稿"><button class="search-eye" data-action="search-mode" aria-label="显示未匹配项" aria-pressed="${state.showUnmatched}" title="${state.showUnmatched ? "当前显示全部，点击隐藏未匹配项" : "当前隐藏未匹配项，点击显示全部"}">${icon(state.showUnmatched ? "eye" : "eyeOff")}</button></div></div><div id="queueList">${queueList()}</div>`
   );
 }
-function openCommissionDetail(key) {
-  const r = state.records.find(record => record.id === key);
-  if (!r) throw Error("约稿已更新，请刷新后查看");
+let detailRequest = 0;
+async function openCommissionDetail(key) {
+  const sequence = ++detailRequest;
+  const generation = loadId;
+  let r = state.records.find(record => record.id === key);
+  if (!r) {
+    r = await api("/commissions/" + encodeURIComponent(key));
+    if (generation !== loadId || sequence !== detailRequest) return;
+    state.records.push(r);
+  }
   const dialog = $("#commissionDetail");
   const fields = [
     ["联系方式", [r.contact_type, r.contact].filter(Boolean).join(" · ")],
@@ -348,7 +373,7 @@ function openCommissionDetail(key) {
   ];
   dialog.dataset.key = key;
   dialog.innerHTML = `<div class="dialog-head"><h2 id="detailTitle">约稿详情</h2><button class="iconbtn" data-dismiss="commissionDetail" aria-label="关闭">${icon("x")}</button></div>
-    <div class="dialog-scroll"><section><h3>${esc(r.nickname)} ${statusTag(r.status)}</h3>
+    <div class="dialog-scroll"><section><h3>${esc(r.nickname)} ${commissionTags(r)} ${statusTag(r.status)}</h3>
     <dl class="detail-fields">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value || "—")}</dd></div>`).join("")}</dl></section>
     <section><h3>${esc(r.title || "约稿需求")}</h3><p class="detail-brief">${esc(r.requirements || "暂无详细需求")}</p>
     ${r.attachments.length ? `<div class="thumbs">${r.attachments.map((attachment, i) => `<div class="thumb">${thumbnailButton(attachment, i)}</div>`).join("")}</div>` : ""}</section>
@@ -367,7 +392,7 @@ function receiptList() {
   );
   if (!entries.length) return empty(query ? "没有匹配的收款" : "暂无收款记录");
   const cutoff = localDay();
-  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">约稿内容</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td class="receipt-title">${esc(p.title || "—")}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">约稿内容</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${commissionTags(p)}</td><td class="receipt-title">${esc(p.title || "—")}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function receiptsPage() {
   return (
@@ -381,19 +406,17 @@ function optionCard(key, label, ico) {
 function settingsPage() {
   return (
     title("设置") +
-    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>JSON 备份包含设置和原图，CSV 导出约稿与收款明细，Beancount 导出账本。注意仅支持json格式导入。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><a class="btn" href="/api/export/csv" download>导出 CSV</a><a class="btn" href="/api/export/beancount" download>导出 Beancount</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.records.some((r) => r.sample) ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a><a class="linkbtn" href="/llms.txt" target="_blank" rel="noopener">智能体调用指南</a></div></section></div>`
+    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>JSON 备份包含设置和原图，CSV 导出约稿与收款明细，Beancount 导出账本。注意仅支持json格式导入。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><a class="btn" href="/api/export/csv" download>导出 CSV</a><a class="btn" href="/api/export/beancount" download>导出 Beancount</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.has_samples ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a><a class="linkbtn" href="/llms.txt" target="_blank" rel="noopener">智能体调用指南</a></div></section></div>`
   );
 }
 function render() {
   hideChartTip();
-  const page = location.hash.slice(1),
-    pages = {
+  const pages = {
       overview: "工作台",
       queue: "排队列表",
       receipts: "收款记录",
       settings: "设置",
     };
-  state.page = Object.hasOwn(pages, page) ? page : "overview";
   $("#crumb").textContent = pages[state.page];
   document.title = pages[state.page] + " · 稿序";
   $$("nav [data-page]").forEach((a) => {
@@ -401,7 +424,7 @@ function render() {
     if (a.dataset.page === state.page) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  const count = queueRecords().length;
+  const count = state.count;
   $("#navCount").textContent = count;
   $("#navCount").hidden = !count;
   const views = {
@@ -511,13 +534,14 @@ function openEditor(key = null, before = null) {
   editorGeneration++;
   clearTimeout(suggestTimer);
   editing = key;
+  editingRevision = r.revision;
   insertBefore = before;
   attachments = (r.attachments || []).map((a) => ({ ...a }));
   readingFiles = 0;
   busy = false;
   $("#commissionForm").innerHTML =
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
- <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label></div></section>
+ <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label>${key ? `<label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority ? "checked" : ""}>插队</label>` : ""}</div></section>
  <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="iconbtn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
@@ -598,6 +622,7 @@ async function submitRecord(e) {
     ...(!editing && state.page === "queue" && state.lane === "deferred"
       ? { queue: "deferred" }
       : {}),
+    ...(editing ? { revision: editingRevision, is_priority: f.is_priority.checked } : {}),
     nickname: f.nickname.value,
     contact_type: f.contact_type.value,
     contact: f.contact.value,
@@ -626,6 +651,7 @@ async function submitRecord(e) {
     await refresh();
     toast("约稿已保存");
   } catch (error) {
+    if (error.status === 409) await refresh();
     if ($("#editor").open) $("#formError").textContent = error.message;
     else toast(error.message);
   } finally {
@@ -659,6 +685,7 @@ async function showSuggestions() {
     )
     .join("");
 }
+$("#confirm").addEventListener("close", () => { $("#confirmYes").onclick = null; });
 function confirmAction(title, message, action) {
   $("#confirmTitle").textContent = title;
   $("#confirmText").textContent = message;
@@ -726,7 +753,7 @@ async function onClick(event) {
       break;
     }
     case "detail":
-      openCommissionDetail(key);
+      await openCommissionDetail(key);
       break;
     case "edit":
       if ($("#commissionDetail").open) $("#commissionDetail").close();
@@ -757,6 +784,10 @@ async function onClick(event) {
       state.showUnmatched = !state.showUnmatched;
       render();
       $('[data-action="search-mode"]').focus();
+      break;
+    case "open-lane":
+      state.lane = b.dataset.lane;
+      state.query = "";
       break;
     case "lane":
       state.lane = b.dataset.lane;
@@ -901,17 +932,11 @@ document.addEventListener("change", async (e) => {
     if (el.id === "importFile" && el.files[0]) {
       const file = el.files[0];
       el.value = "";
-      let snapshot;
-      try {
-        snapshot = JSON.parse(await file.text());
-      } catch {
-        throw Error("请选择有效的 JSON 备份文件");
-      }
       confirmAction(
         "导入备份",
         `使用「${file.name}」中的数据替换当前全部约稿、收款、设置和图片？`,
         async () => {
-          await api("/import", "POST", snapshot);
+          await api("/import", "POST", file);
           await refresh();
           toast("备份已恢复");
         },
@@ -1093,10 +1118,14 @@ $("#clock").innerHTML =
     weekday: "short",
   }).format(new Date());
 window.addEventListener("hashchange", () => {
-  if (state.stats) render();
+  $("#main").textContent = "加载中…";
+  $("#main").setAttribute("aria-busy", "true");
+  refresh().catch(showLoadError);
   window.scrollTo(0, 0);
 });
-refresh().catch((err) => {
+function showLoadError(err) {
+  $("#main").removeAttribute("aria-busy");
   $("#main").innerHTML =
     `<div class="card"><p>${esc(err.message)}</p>${button("重新加载", "refresh")}</div>`;
-});
+}
+refresh().catch(showLoadError);

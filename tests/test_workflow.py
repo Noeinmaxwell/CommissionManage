@@ -1,10 +1,12 @@
 """Regression checks for queue changes, accounting and transactional backup restore."""
 
+import asyncio
 import base64
 import csv
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -15,12 +17,14 @@ from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
+from uuid import uuid4
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from PIL import Image
 
-from app import Settings, today
+from app import Settings, lifespan, today
 
 
 class WorkflowTest(unittest.TestCase):
@@ -45,24 +49,25 @@ class WorkflowTest(unittest.TestCase):
                 "warning",
             ],
             cwd=root,
-            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db")},
+            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db"),
+                 "COMMISSION_ADMIN_PASSWORD": "test-admin", "COMMISSION_VIEWER_PASSWORD": "test-viewer"},
         )
         cls.addClassCleanup(process.wait)
         cls.addClassCleanup(process.terminate)
         for _ in range(100):
             try:
-                with urlopen(cls.base + "/settings", timeout=1):
+                with urlopen(cls.base.removesuffix("/api") + "/healthz", timeout=1):
                     return
             except OSError:
                 time.sleep(0.05)
         raise RuntimeError("Test server failed to start")
 
-    def api(self, path, method="GET", data=None):
+    def api(self, path, method="GET", data=None, headers=None):
         payload = json.dumps(data).encode() if data is not None else None
         req = Request(
             self.base + path,
             payload,
-            {"Content-Type": "application/json"},
+            {"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode(b"admin:test-admin").decode(), **(headers or {})},
             method=method,
         )
         with urlopen(req, timeout=5) as response:
@@ -110,7 +115,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(self.api("/stats")["count"], 2)
         self.assertIsNone(self.api("/stats")["until"])
         self.api(
-            path + "/" + a["id"], "PUT", {"nickname": "小花猫", "status": "已结稿"}
+            path + "/" + a["id"], "PUT", {**self.api(path + "/" + a["id"]), "status": "已结稿"}
         )
         self.assertEqual(names("deferred"), ["D"])
         from urllib.parse import quote
@@ -119,7 +124,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(
                 self.api("/clients?q=" + quote(q))[0]["nickname"], "小花猫"
             )
-        self.api(path + "/" + a["id"], "PUT", a)
+        self.api(path + "/" + a["id"], "PUT", {**a, "revision": self.api(path + "/" + a["id"])["revision"]})
         self.assertEqual(names(), ["B", "C", "小花猫"])
 
     def test_receipts_and_concurrent_appends(self):
@@ -137,6 +142,7 @@ class WorkflowTest(unittest.TestCase):
                 target,
                 "POST",
                 {"platform": "支付宝", "amount": "0.10", "date": now.isoformat()},
+                {"Idempotency-Key": uuid4().hex},
             )
 
         with ThreadPoolExecutor(4) as executor:
@@ -145,6 +151,7 @@ class WorkflowTest(unittest.TestCase):
             target,
             "POST",
             {"amount": 999, "date": (now + timedelta(days=1)).isoformat()},
+            {"Idempotency-Key": uuid4().hex},
         )
         stats = self.api("/stats")
         self.assertIn(prev.year, stats["years"])
@@ -183,6 +190,114 @@ class WorkflowTest(unittest.TestCase):
         ledger = self.api("/export/beancount").decode()
         self.assertEqual(ledger.count(' * "=甲方"'), 6)
         self.assertIn("Income:Commissions  -60.00 CNY", ledger)
+
+    def test_concurrent_retry_and_stale_update(self):
+        order = self.api("/commissions", "POST", {"nickname": "小林"})
+        path = "/commissions/" + order["id"]
+        headers = {"Idempotency-Key": "same-receipt"}
+        def append(_):
+            return self.api(path + "/payments", "POST", {"amount": 25}, headers)
+        with ThreadPoolExecutor(4) as executor:
+            list(executor.map(append, range(6)))
+        self.assertEqual(len(self.api(path)["payments"]), 1)
+        with self.assertRaises(HTTPError) as conflict:
+            self.api(path, "PUT", {**order, "title": "旧版本"})
+        self.assertEqual(conflict.exception.code, 409)
+        with self.assertRaises(HTTPError) as invalid:
+            self.api(path + "/payments", "POST", {"amount": 26}, headers)
+        self.assertEqual(invalid.exception.code, 409)
+        self.api("/import", "POST", self.api("/export"))
+        self.assertEqual(len(append(None)["payments"]), 1)
+
+    def test_access_roles(self):
+        with self.assertRaises(HTTPError) as missing:
+            self.api("/commissions", headers={"Authorization": ""})
+        self.assertEqual(missing.exception.code, 401)
+        viewer = {"Authorization": "Basic " + base64.b64encode(b"viewer:test-viewer").decode()}
+        self.assertEqual(self.api("/commissions", headers=viewer), [])
+        for path, method, body in [("/export", "GET", None), ("/export/csv", "GET", None),
+                                   ("/export/beancount", "GET", None), ("/commissions", "POST", {}),
+                                   ("/import", "POST", {}), ("/examples", "DELETE", None)]:
+            with self.assertRaises(HTTPError) as forbidden:
+                self.api(path, method, body, viewer)
+            self.assertEqual(forbidden.exception.code, 403)
+
+    def test_names_and_page_snapshots(self):
+        for contact in ("001", "002"):
+            self.api("/commissions", "POST", {"nickname": "Alex", "contact": contact})
+        self.assertEqual({r["contact"] for r in self.api("/clients?q=Alex")}, {"001", "002"})
+        for page in ("overview", "queue", "receipts", "settings"):
+            snapshot = self.api("/workspace?page=" + page)
+            self.assertEqual(snapshot["count"], 2)
+            self.assertEqual("stats" in snapshot, page == "overview")
+            self.assertEqual(len(snapshot["records"]), 2 if page in ("overview", "queue") else 0)
+
+    def test_priority_tag_survives_moves_edits_and_restore(self):
+        path = "/commissions"
+        target = self.api(path, "POST", {"nickname": "普通"})
+        self.assertFalse(target["is_priority"])
+        inserted = self.api(path + "?before=" + target["id"], "POST", {"nickname": "插队"})
+        key = path + "/" + inserted["id"]
+        self.assertTrue(inserted["is_priority"])
+        self.api(key + "/move", "POST", {"before": None})
+        self.api(key + "/defer", "POST")
+        current = self.api(key)
+        current.pop("is_priority")
+        current["payments"] = [{"amount": "1.00"}]
+        current = self.api(key, "PUT", current)
+        self.assertTrue(current["is_priority"])
+        self.assertTrue(self.api("/payments")[0]["is_priority"])
+        for marked in (False, True):
+            current = self.api(key, "PUT", {**current, "is_priority": marked})
+            self.assertIs(current["is_priority"], marked)
+        snapshot = self.api("/export")
+        next(r for r in snapshot["commissions"] if r["id"] == target["id"]).pop("is_priority")
+        self.api("/import", "POST", snapshot)
+        self.assertTrue(self.api(key)["is_priority"])
+        self.assertFalse(self.api(path + "/" + target["id"])["is_priority"])
+
+    def test_overview_lane_totals_and_preview_order(self):
+        for lane in ("normal", "deferred"):
+            for i in range(6):
+                self.api("/commissions", "POST", {
+                    "queue": lane, "nickname": f"{lane}-{i}", "title": f"约稿{i}",
+                    "status": "已结稿" if i == 0 else "进行中",
+                })
+        snapshot = self.api("/workspace?page=overview")
+        for lane, total in (("normal", "count"), ("deferred", "deferred_count")):
+            self.assertEqual(snapshot["stats"][total], 5)
+            full = self.api("/commissions?queue=" + lane)
+            preview = [r for r in snapshot["records"] if r["queue"] == lane]
+            self.assertEqual([r["id"] for r in preview], [r["id"] for r in full[:4]])
+            self.assertEqual([r["title"] for r in preview], [r["title"] for r in full[:4]])
+
+    def test_migration_normalizes_existing_attachment_aliases(self):
+        async def start():
+            async with lifespan(None):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "legacy.db"
+            with sqlite3.connect(db_path) as db:
+                db.executescript("""
+                    CREATE TABLE jobs(id TEXT PRIMARY KEY, pos INTEGER, body TEXT NOT NULL);
+                    CREATE TABLE images(id TEXT PRIMARY KEY, job TEXT, mime TEXT, bytes BLOB);
+                    PRAGMA user_version=1;
+                """)
+                names = ["原名", "别名", "原名", "别名"]
+                body = {"attachments": [{"id": "img", "name": name} for name in names]}
+                db.execute("INSERT INTO jobs VALUES ('job',0,?)", (json.dumps(body),))
+                db.execute("INSERT INTO images VALUES ('img','job','image/png',?)", (b"image",))
+            with patch("app.DB", db_path):
+                asyncio.run(start())
+                asyncio.run(start())
+            with sqlite3.connect(db_path) as db:
+                refs = json.loads(db.execute("SELECT body FROM jobs").fetchone()[0])["attachments"]
+                self.assertEqual([r["name"] for r in refs], ["原名", "别名"])
+                self.assertEqual(refs[0]["id"], "img")
+                self.assertNotEqual(refs[1]["id"], "img")
+                self.assertEqual(dict(db.execute("SELECT id,bytes FROM images")),
+                                 {r["id"]: b"image" for r in refs})
 
     def test_all_time_includes_quiet_months(self):
         now = today()
@@ -262,7 +377,8 @@ class WorkflowTest(unittest.TestCase):
             path = "/commissions/" + record["id"]
             for target in ("进行中", "进行中", "已结稿", "已结稿"):
                 self.api(path + "/status", "PATCH", {"status": target})
-                self.assertEqual(self.api(path), {**record, "status": target})
+                current = self.api(path)
+                self.assertEqual(current, {**record, "status": target, "revision": current["revision"]})
             with self.assertRaises(HTTPError) as error:
                 self.api(path + "/status", "PATCH", {"status": "进行中"})
             self.assertEqual(error.exception.code, 409)
@@ -319,6 +435,14 @@ class WorkflowTest(unittest.TestCase):
         snapshot = self.api("/export")
         self.api("/commissions/" + r["id"], "DELETE")
         self.api("/import", "POST", snapshot)
+        self.assertEqual(self.api("/export"), snapshot)
+        current = self.api("/commissions/" + r["id"])
+        with self.assertRaises(HTTPError) as duplicate:
+            self.api("/commissions/" + r["id"], "PUT", {**current, "attachments": current["attachments"] * 2})
+        self.assertEqual(duplicate.exception.code, 422)
+        legacy = json.loads(json.dumps(snapshot))
+        legacy["commissions"][0]["attachments"] *= 2
+        self.api("/import", "POST", legacy)
         self.assertEqual(self.api("/export"), snapshot)
         self.assertEqual(
             self.api("/images/" + r["attachments"][0]["id"]), stream.getvalue()
