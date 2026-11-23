@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import api_examples
 
-from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi import Body, FastAPI, Header, HTTPException, Path as PathParam, Query, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +50,7 @@ def parse_date(value):
 
 
 Day = Annotated[date, BeforeValidator(parse_date)]
+CommissionKey = Annotated[str, PathParam(description="本次操作的约稿 ID。使用新建约稿返回的 id，或从 GET /api/commissions 列表读取。")]
 Queue = Literal["normal", "deferred"]
 Status = Literal["未开始", "进行中", "已结稿"]
 
@@ -102,22 +103,22 @@ class Attachment(BaseModel):
 
 class Commission(BaseModel):
     nickname: str = Field("", description="可留空，自动生成甲方编号")
-    contact_type: str = ""
-    contact: str = ""
+    contact_type: str = Field("", description="联系方式，如 QQ 或微信")
+    contact: str = Field("", description="该联系方式对应的账号")
     title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
-    requirements: str = ""
+    requirements: str = Field("", description="详细需求说明")
     is_priority: bool = Field(False, description="插队标记，插入队列时自动设置，可在编辑时更改")
-    planned: Day | None = None
-    started: Day | None = None
-    status: Status = "未开始"
-    queue: Queue = "normal"
+    planned: Day | None = Field(None, description="预计开始日期，可留空")
+    started: Day | None = Field(None, description="实际开始日期，可留空")
+    status: Status = Field("未开始", description="结稿状态可选未开始、进行中、已结稿。已结稿的约稿进入历史列表。")
+    queue: Queue = Field("normal", description="normal 表示排队中，deferred 表示延期等待。新建时默认 normal。")
     payments: list[Payment] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list)
 
 
 class Saved(Commission):
     brief_received: bool = Field(False, description="由需求说明或参考图自动判断")
-    id: str
+    id: str = Field(description="约稿 ID，用作 /api/commissions/{key} 中的 key")
     sample: bool = False
 
 
@@ -527,9 +528,14 @@ def receipt_rows(records):
 )
 def create(
     item: Annotated[Commission, Body(openapi_examples=api_examples.CREATE)],
-    before: str | None = Query(None, openapi_examples={"insert": api_examples.example("插入到指定约稿前", "替换为同队约稿ID")}),
+    before: str | None = Query(None, description="位置填在 URL 查询参数中。传入同队未结稿约稿的 id，新单插在它前面；省略则追加到队尾。", openapi_examples={"insert": api_examples.example("插入到指定约稿前", "替换为同队约稿ID")}),
 ):
-    """返回 201 和新约稿的 id。before 是同一队列中的约稿 ID，省略时排至队尾。重复提交会创建多条约稿。"""
+    """请求体填写约稿信息。从 Examples 选择「填写联系账号、排期与稿费」可查看字段组合。
+    `queue` 选 `normal`（排队中）或 `deferred`（延期等待）。直接建历史单请传 `status="已结稿"`。
+
+    例如队列已有 A、B。调用 `POST /api/commissions?before=B的ID` 新建 C，结果为 A、C、B，
+    C 自动带「插队」标记。只在请求体中设置 `is_priority=true` 会添加标记，位置仍按 before 决定。
+    已结稿的新单忽略 before。成功返回 201，响应的 id 可用于后续操作。重复提交会创建多单。"""
     with database(True) as db:
         key = uuid4().hex
         insert_before = before if item.status != "已结稿" else None
@@ -548,7 +554,7 @@ def create(
     response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
-def detail(key: str):
+def detail(key: CommissionKey):
     with database() as db:
         return lookup(db, key)
 
@@ -556,12 +562,18 @@ def detail(key: str):
 @app.put(
     "/api/commissions/{key}",
     tags=["约稿"],
-    summary="完整更新约稿，推迟预计开始日期会进入延期队列",
+    summary="保存编辑后的约稿（与前端编辑窗口相同）",
     response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
-def update(key: str, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
-    """先 GET 详情再修改字段并回传。保留完整 payments 数组及 attachments 中已有的 id，省略这些列表会清空相应数据。状态变更和追加收款优先使用专用接口。"""
+def update(key: CommissionKey, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
+    """先 GET 同一路径，修改所需字段，再带上原 revision 提交整份约稿。缺少 payments 或 attachments 会清空对应列表。
+    版本过期返回 409，此时重新读取并核对修改。
+
+    与前端「编辑约稿 → 保存约稿」使用同一规则：编辑前后均未结稿，原队列和提交的队列均为 normal
+    （编辑时省略 queue 表示沿用原队列），且新旧 planned 都有日期时，改到更晚一天或更晚会自动移入延期队尾。
+    例如从 3 月 1 日改到 3 月 5 日会延期；首次填日期、清空、提前或保持日期都不会触发自动延期。
+    前端卡片的「延期」按钮则直接调用 POST /api/commissions/{key}/defer，无需编辑日期。"""
     with database(True) as db:
         previous = lookup(db, key)
         if previous["revision"] != item.revision:
@@ -593,7 +605,7 @@ def update(key: str, item: Annotated[CommissionUpdate, Body(openapi_examples=api
 @app.delete(
     "/api/commissions/{key}", tags=["约稿"], summary="删除约稿及其附件", status_code=204
 )
-def remove(key: str):
+def remove(key: CommissionKey):
     with database(True) as db:
         lookup(db, key)
         db.execute("DELETE FROM jobs WHERE id=?", (key,))
@@ -606,7 +618,10 @@ def remove(key: str):
     summary="调整排队位置",
     status_code=204,
 )
-def move_job(key: str, movement: Annotated[Movement, Body(openapi_examples=api_examples.MOVE)]):
+def move_job(key: CommissionKey, movement: Annotated[Movement, Body(openapi_examples=api_examples.MOVE)]):
+    """路径 key 填要移动的约稿 ID，请求体 before 填目标约稿 ID。两单都须未结稿且在同一队列。
+    例如队列为 A、B、C，向 /api/commissions/C的ID/move 发送 {"before":"A的ID"}，结果为 C、A、B。
+    发送 {} 或 {"before":null} 会移到队尾。成功返回 204，跨队移动返回 409。"""
     with database(True) as db:
         row = lookup(db, key)
         move(db, key, movement.before, row.get("queue", "normal"))
@@ -618,7 +633,7 @@ class StatusChange(BaseModel):
 
 
 @app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿", status_code=204)
-def change_status(key: str, change: Annotated[StatusChange, Body(openapi_examples=api_examples.STATUS)]):
+def change_status(key: CommissionKey, change: Annotated[StatusChange, Body(openapi_examples=api_examples.STATUS)]):
     with database(True) as db:
         current = lookup(db, key)["status"]
         expected = "未开始" if change.status == "进行中" else "进行中"
@@ -637,7 +652,7 @@ def change_status(key: str, change: Annotated[StatusChange, Body(openapi_example
     summary="移入延期等待队尾",
     status_code=204,
 )
-def defer_job(key: str):
+def defer_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "deferred")
     return Response(status_code=204)
@@ -649,7 +664,7 @@ def defer_job(key: str):
     summary="恢复至正常队尾",
     status_code=204,
 )
-def resume_job(key: str):
+def resume_job(key: CommissionKey):
     with database(True) as db:
         transfer(db, key, "normal")
     return Response(status_code=204)
@@ -663,7 +678,7 @@ def resume_job(key: str):
     response_model_exclude_none=True,
 )
 def pay(
-    key: str,
+    key: CommissionKey,
     payment: Annotated[Payment, Body(openapi_examples=api_examples.PAYMENT)],
     idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ):
@@ -702,7 +717,7 @@ def pay(
         }
     },
 )
-def image(key: str, thumbnail: bool = False):
+def image(key: Annotated[str, PathParam(description="参考图的附件 ID，取自约稿详情 attachments[].id")], thumbnail: bool = False):
     with database() as db:
         if thumbnail:
             row = db.execute(
