@@ -49,8 +49,7 @@ class WorkflowTest(unittest.TestCase):
                 "warning",
             ],
             cwd=root,
-            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db"),
-                 "COMMISSION_ADMIN_PASSWORD": "test-admin", "COMMISSION_VIEWER_PASSWORD": "test-viewer"},
+            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db")},
         )
         cls.addClassCleanup(process.wait)
         cls.addClassCleanup(process.terminate)
@@ -67,7 +66,7 @@ class WorkflowTest(unittest.TestCase):
         req = Request(
             self.base + path,
             payload,
-            {"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode(b"admin:test-admin").decode(), **(headers or {})},
+            {"Content-Type": "application/json", **(headers or {})},
             method=method,
         )
         with urlopen(req, timeout=5) as response:
@@ -209,18 +208,18 @@ class WorkflowTest(unittest.TestCase):
         self.api("/import", "POST", self.api("/export"))
         self.assertEqual(len(append(None)["payments"]), 1)
 
-    def test_access_roles(self):
-        with self.assertRaises(HTTPError) as missing:
-            self.api("/commissions", headers={"Authorization": ""})
-        self.assertEqual(missing.exception.code, 401)
-        viewer = {"Authorization": "Basic " + base64.b64encode(b"viewer:test-viewer").decode()}
-        self.assertEqual(self.api("/commissions", headers=viewer), [])
-        for path, method, body in [("/export", "GET", None), ("/export/csv", "GET", None),
-                                   ("/export/beancount", "GET", None), ("/commissions", "POST", {}),
-                                   ("/import", "POST", {}), ("/examples", "DELETE", None)]:
-            with self.assertRaises(HTTPError) as forbidden:
-                self.api(path, method, body, viewer)
-            self.assertEqual(forbidden.exception.code, 403)
+    def test_direct_access_from_private_network(self):
+        host = "studio.internal:5444"
+        headers = {"Host": host}
+        with urlopen(Request(self.base.removesuffix("/api") + "/", headers=headers)) as response:
+            self.assertEqual(response.status, 200)
+            self.assertNotIn("WWW-Authenticate", response.headers)
+        record = self.api("/commissions", "POST", {"nickname": "直接访问"},
+                          {**headers, "Origin": "http://" + host})
+        self.assertEqual(self.api("/export", headers=headers)["commissions"][0]["id"], record["id"])
+        with self.assertRaises(HTTPError) as cross_origin:
+            self.api("/commissions", "POST", {}, {**headers, "Origin": "https://other.example"})
+        self.assertEqual(cross_origin.exception.code, 403)
 
     def test_names_and_page_snapshots(self):
         for contact in ("001", "002"):

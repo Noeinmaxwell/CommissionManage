@@ -10,7 +10,6 @@ StateDirectory=commission-manage
 WorkingDirectory=/home/code/CommissionManage
 Environment=COMMISSION_DB=/var/lib/commission-manage/studio.sqlite3
 Environment=PYTHONDONTWRITEBYTECODE=1
-EnvironmentFile=-/etc/commission-manage/access.env
 ExecStart=/home/code/CommissionManage/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 5444 --no-proxy-headers
 Restart=on-failure
 RestartSec=5

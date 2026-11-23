@@ -3,8 +3,6 @@
 import base64
 import binascii
 import hashlib
-import ipaddress
-import secrets
 import csv
 import json
 import os
@@ -240,47 +238,13 @@ app = FastAPI(
 )
 
 
-def local_request(request):
-    if not request.client or request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        return False
-    try:
-        return ipaddress.ip_address(request.client.host).is_loopback
-    except ValueError:
-        return False
-
-
-def access_role(request):
-    admin = os.environ.get("COMMISSION_ADMIN_PASSWORD")
-    viewer = os.environ.get("COMMISSION_VIEWER_PASSWORD")
-    if not admin and not viewer and local_request(request):
-        return "admin"
-    scheme, _, token = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() == "basic":
-        try:
-            username, _, password = base64.b64decode(token, validate=True).partition(b":")
-        except (ValueError, binascii.Error):
-            return None
-        for login, secret in (("admin", admin), ("viewer", viewer)):
-            if secret and username == login.encode() and secrets.compare_digest(password, secret.encode()):
-                return login
-    return None
-
-
 @app.get("/healthz", include_in_schema=False)
 def health():
     return {"status": "ok"}
 
 
 @app.middleware("http")
-async def authorize_request(request: Request, call_next):
-    if request.url.path != "/healthz":
-        role = access_role(request)
-        if not role:
-            return JSONResponse({"detail": "需要登录"}, status_code=401,
-                                headers={"WWW-Authenticate": 'Basic realm="CommissionManage", charset="UTF-8"'})
-        if role != "admin" and (request.method not in ("GET", "HEAD", "OPTIONS")
-                                or request.url.path.rstrip("/").startswith("/api/export")):
-            return JSONResponse({"detail": "此操作需要管理员权限"}, status_code=403)
+async def check_request_origin(request: Request, call_next):
     origin = request.headers.get("origin")
     if (
         request.method not in ("GET", "HEAD", "OPTIONS")
