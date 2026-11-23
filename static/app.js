@@ -193,7 +193,7 @@ function monthlyChart(values) {
     const label = entries.length > 12
       ? (i % 3 === 0 ? key : "")
       : Number(key.slice(5)) + "月";
-    html += `<g data-tip="${key} · 收入 ¥${money(n)}"><rect x="${x - w / 2}" y="12" width="${w}" height="155" fill="transparent"/><rect class="bar ${current ? "current" : ""}" x="${x - bw / 2}" y="${bottom - Math.max(h, 1.5)}" width="${bw}" height="${Math.max(h, 1.5)}" rx="3"/><text x="${x}" y="166" text-anchor="middle">${label}</text></g>`;
+    html += `<g><rect data-tip="${key} · 收入 ¥${money(n)}" class="bar ${current ? "current" : ""}" x="${x - bw / 2}" y="${bottom - Math.max(h, 1.5)}" width="${bw}" height="${Math.max(h, 1.5)}" rx="3"/><text x="${x}" y="166" text-anchor="middle">${label}</text></g>`;
   });
   return `<div class="plot-scroll"><svg class="plot" style="min-width:${right > 512 ? right + 8 : 0}px" viewBox="0 0 ${right + 8} 175" role="img" aria-label="月收入柱状图">${html}</svg></div><details class="chart-data"><summary>查看月收入明细</summary>${entries.map(([m, n]) => `<div><span>${m}</span><b>¥${money(n)}</b></div>`).join("")}</details>`;
 }
