@@ -163,6 +163,33 @@ def database(write=False, *, streaming=False):
         connection.close()
 
 
+def normalize_attachment_refs(db):
+    affected = db.execute("""
+        SELECT id,body FROM jobs WHERE EXISTS (
+            SELECT 1 FROM json_each(jobs.body, '$.attachments')
+            GROUP BY json_extract(value, '$.id') HAVING count(*) > 1
+        )""").fetchall()
+    for job in affected:
+        body = json.loads(job["body"])
+        seen, names, refs = set(), set(), []
+        for ref in body["attachments"]:
+            original = ref["id"]
+            label = (original, ref["name"])
+            if label in names:
+                continue
+            names.add(label)
+            if original in seen:
+                alias = uuid4().hex
+                db.execute("""INSERT INTO images(id,job,mime,bytes,thumbnail)
+                              SELECT ?,job,mime,bytes,thumbnail FROM images WHERE job=? AND id=?""",
+                           (alias, job["id"], original))
+                ref = {**ref, "id": alias}
+            seen.add(original)
+            refs.append(ref)
+        body["attachments"] = refs
+        db.execute("UPDATE jobs SET body=? WHERE id=?", (json.dumps(body, ensure_ascii=False), job["id"]))
+
+
 @asynccontextmanager
 async def lifespan(_):
     DB.parent.mkdir(parents=True, exist_ok=True)
@@ -195,7 +222,9 @@ async def lifespan(_):
         if db.execute("PRAGMA user_version").fetchone()[0] == 0:
             if not db.execute("SELECT 1 FROM jobs LIMIT 1").fetchone():
                 load_examples(db)
-            db.execute("PRAGMA user_version=1")
+        if db.execute("PRAGMA user_version").fetchone()[0] < 2:
+            normalize_attachment_refs(db)
+            db.execute("PRAGMA user_version=2")
     yield
 
 
@@ -774,6 +803,7 @@ class Statistics(BaseModel):
     periods: dict[int, PeriodIncome] = Field(description="3、6、12 个自然月的收入与月均，含本月，零收入月参与平均")
 
     count: int
+    deferred_count: int = Field(description="延期等待队列中尚未结稿的约稿数量")
     until: date | None
     total: float
     average: float
@@ -807,6 +837,7 @@ def income_stats(records, months, all_time, year):
         for r in records
         if r["status"] != "已结稿" and r.get("queue", "normal") == "normal"
     ]
+    deferred_count = sum(r.get("queue") == "deferred" and r["status"] != "已结稿" for r in records)
     for r in records:
         for p in r["payments"]:
             day = date.fromisoformat(p["date"])
@@ -828,6 +859,7 @@ def income_stats(records, months, all_time, year):
     return {
         "periods": periods,
         "count": len(active),
+        "deferred_count": deferred_count,
         "until": max((r["planned"] for r in active if r["planned"]), default=None),
         "total": total,
         "average": round(total / span, 2),
@@ -866,7 +898,8 @@ def workspace(page: Literal["overview", "queue", "receipts", "settings"],
     normal = [r for r in records if r["status"] != "已结稿" and r.get("queue", "normal") == "normal"]
     result.update(count=len(normal), has_samples=any(r.get("sample") for r in records))
     if page == "overview":
-        result.update(records=normal[:4], stats=income_stats(records, months, all_time, year))
+        deferred = [r for r in records if r["status"] != "已结稿" and r.get("queue") == "deferred"]
+        result.update(records=normal[:4] + deferred[:4], stats=income_stats(records, months, all_time, year))
     elif page == "queue":
         result["records"] = commission_cards(records)
     else:

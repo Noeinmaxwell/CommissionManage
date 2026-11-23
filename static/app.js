@@ -253,14 +253,29 @@ window.addEventListener("blur", hideChartTip);
 function empty(text, create = false) {
   return `<div class="empty"><span class="tile">${icon("queue")}</span><strong>${text}</strong>${create ? button("新建约稿", "new", "plus") : ""}</div>`;
 }
+function queuePreview(lane) {
+  const deferred = lane === "deferred";
+  const records = queueRecords(lane);
+  const heading = deferred ? "延期预览" : "排队预览";
+  const columns = deferred ? ["甲方昵称", "约稿内容"] : ["顺位", "甲方", "约稿内容", "预计开始", "结稿状态"];
+  const rows = records.map((record, index) => {
+    const nickname = `<button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(record.nickname)}</button>`;
+    return `<tr data-action="detail" data-key="${esc(record.id)}">
+      ${deferred ? "" : `<td>${String(index + 1).padStart(2, "0")}</td>`}
+      <td>${nickname}${deferred ? "" : sampleTag(record)}</td><td>${esc(record.title || "—")}</td>
+      ${deferred ? "" : `<td class="preview-date">${esc(record.planned || "待定")}</td><td>${statusTag(record.status)}</td>`}</tr>`;
+  }).join("");
+  return `<section class="card preview-${lane}"><div class="card-head"><h2>${icon(deferred ? "calendar" : "queue")}${heading}</h2>
+    <a href="#queue" data-action="open-lane" data-lane="${lane}" class="linkbtn" aria-label="查看全部${queueNames[lane]}约稿">查看全部 ${icon("arrow")}</a></div>
+    ${rows ? `<div class="preview-scroll"><table class="compact-table" aria-label="${heading}"><thead><tr>${columns.map(label => `<th scope="col">${label}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>` : empty(deferred ? "暂无延期约稿" : "暂无排队中的约稿", !deferred)}</section>`;
+}
 function overview() {
-  const s = state.stats,
-    records = queueRecords().slice(0, 4);
+  const s = state.stats;
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
-    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("total")}${metric("average")}</div></div>
+    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong><span class="deferred-count">延期中的甲方 <b>${s.deferred_count}</b> 位</span></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("total")}${metric("average")}</div></div>
  <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}<option value="all" ${!state.year && state.months === "all" ? "selected" : ""}>全部时间</option>${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
- <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-action="detail" data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
+ <div class="queue-previews">${queuePreview("normal")}${queuePreview("deferred")}</div>`
   );
 }
 function briefDetails(record) {
@@ -767,6 +782,10 @@ async function onClick(event) {
       state.showUnmatched = !state.showUnmatched;
       render();
       $('[data-action="search-mode"]').focus();
+      break;
+    case "open-lane":
+      state.lane = b.dataset.lane;
+      state.query = "";
       break;
     case "lane":
       state.lane = b.dataset.lane;

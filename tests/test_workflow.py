@@ -1,10 +1,12 @@
 """Regression checks for queue changes, accounting and transactional backup restore."""
 
+import asyncio
 import base64
 import csv
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -15,13 +17,14 @@ from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
+from unittest.mock import patch
 from uuid import uuid4
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from PIL import Image
 
-from app import Settings, today
+from app import Settings, lifespan, today
 
 
 class WorkflowTest(unittest.TestCase):
@@ -228,6 +231,49 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(snapshot["count"], 2)
             self.assertEqual("stats" in snapshot, page == "overview")
             self.assertEqual(len(snapshot["records"]), 2 if page in ("overview", "queue") else 0)
+
+    def test_overview_lane_totals_and_preview_order(self):
+        for lane in ("normal", "deferred"):
+            for i in range(6):
+                self.api("/commissions", "POST", {
+                    "queue": lane, "nickname": f"{lane}-{i}", "title": f"约稿{i}",
+                    "status": "已结稿" if i == 0 else "进行中",
+                })
+        snapshot = self.api("/workspace?page=overview")
+        for lane, total in (("normal", "count"), ("deferred", "deferred_count")):
+            self.assertEqual(snapshot["stats"][total], 5)
+            full = self.api("/commissions?queue=" + lane)
+            preview = [r for r in snapshot["records"] if r["queue"] == lane]
+            self.assertEqual([r["id"] for r in preview], [r["id"] for r in full[:4]])
+            self.assertEqual([r["title"] for r in preview], [r["title"] for r in full[:4]])
+
+    def test_migration_normalizes_existing_attachment_aliases(self):
+        async def start():
+            async with lifespan(None):
+                pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "legacy.db"
+            with sqlite3.connect(db_path) as db:
+                db.executescript("""
+                    CREATE TABLE jobs(id TEXT PRIMARY KEY, pos INTEGER, body TEXT NOT NULL);
+                    CREATE TABLE images(id TEXT PRIMARY KEY, job TEXT, mime TEXT, bytes BLOB);
+                    PRAGMA user_version=1;
+                """)
+                names = ["原名", "别名", "原名", "别名"]
+                body = {"attachments": [{"id": "img", "name": name} for name in names]}
+                db.execute("INSERT INTO jobs VALUES ('job',0,?)", (json.dumps(body),))
+                db.execute("INSERT INTO images VALUES ('img','job','image/png',?)", (b"image",))
+            with patch("app.DB", db_path):
+                asyncio.run(start())
+                asyncio.run(start())
+            with sqlite3.connect(db_path) as db:
+                refs = json.loads(db.execute("SELECT body FROM jobs").fetchone()[0])["attachments"]
+                self.assertEqual([r["name"] for r in refs], ["原名", "别名"])
+                self.assertEqual(refs[0]["id"], "img")
+                self.assertNotEqual(refs[1]["id"], "img")
+                self.assertEqual(dict(db.execute("SELECT id,bytes FROM images")),
+                                 {r["id"]: b"image" for r in refs})
 
     def test_all_time_includes_quiet_months(self):
         now = today()
