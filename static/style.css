@@ -561,6 +561,8 @@ h3 {
   display: block;
   overflow: visible;
 }
+.plot { cursor: grab; user-select: none; touch-action: pan-y; }
+.plot.dragging { cursor: grabbing; }
 .plot text {
   fill: #77859a;
   font-family: inherit;
@@ -850,7 +852,6 @@ h3 {
   text-align: left;
 }
 .queue-progress .agreed-total {
-  margin-inline-start: 8px;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -1177,6 +1178,7 @@ body:has(dialog[open]) {
   font-size: 13px;
 }
 .suggest-wrap {
+  min-width: 0;
   position: relative;
 }
 .suggestions {
@@ -1190,7 +1192,8 @@ body:has(dialog[open]) {
   border-radius: 7px;
   box-shadow: 0 5px 14px #25416f28;
   z-index: 2;
-  overflow: hidden;
+  max-height: 9rem;
+  overflow-y: auto;
 }
 .suggestions:empty {
   display: none;
@@ -1200,10 +1203,16 @@ body:has(dialog[open]) {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 9px 10px;
+  padding: 4px 8px;
+  line-height: 1.4;
   width: 100%;
   text-align: left;
   font-size: 13px;
+}
+.suggestions button > * {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .suggestions button:hover,
 .suggestions button:focus {
