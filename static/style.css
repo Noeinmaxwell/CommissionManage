@@ -773,8 +773,8 @@ h3 {
 }
 .queue-card.search-match,
 .tabs button.lane-match {
-  border-color: #ead36b;
-  background: #fff8b8;
+  border-color: #e9deaa;
+  background: #fffae2;
 }
 .tabs button.lane-match {
   color: #714f05;
@@ -1636,6 +1636,7 @@ main > * {
 .sample-tag,
 .priority-tag {
   display: inline-block;
+  background: #fff;
   padding: 1px 5px;
   border: 1px solid #dce4ef;
   border-radius: 4px;
@@ -1644,11 +1645,6 @@ main > * {
   font-weight: 500;
   vertical-align: middle;
   white-space: nowrap;
-}
-.priority-tag {
-  color: #825322;
-  background: #fff4df;
-  border-color: #e9cf9f;
 }
 .ledger-wrap {
   overflow-x: auto;
