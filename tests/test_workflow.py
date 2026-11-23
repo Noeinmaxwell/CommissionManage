@@ -15,6 +15,7 @@ from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO, StringIO
 from pathlib import Path
+from uuid import uuid4
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -45,24 +46,25 @@ class WorkflowTest(unittest.TestCase):
                 "warning",
             ],
             cwd=root,
-            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db")},
+            env={**os.environ, "COMMISSION_DB": str(Path(directory.name) / "test.db"),
+                 "COMMISSION_ADMIN_PASSWORD": "test-admin", "COMMISSION_VIEWER_PASSWORD": "test-viewer"},
         )
         cls.addClassCleanup(process.wait)
         cls.addClassCleanup(process.terminate)
         for _ in range(100):
             try:
-                with urlopen(cls.base + "/settings", timeout=1):
+                with urlopen(cls.base.removesuffix("/api") + "/healthz", timeout=1):
                     return
             except OSError:
                 time.sleep(0.05)
         raise RuntimeError("Test server failed to start")
 
-    def api(self, path, method="GET", data=None):
+    def api(self, path, method="GET", data=None, headers=None):
         payload = json.dumps(data).encode() if data is not None else None
         req = Request(
             self.base + path,
             payload,
-            {"Content-Type": "application/json"},
+            {"Content-Type": "application/json", "Authorization": "Basic " + base64.b64encode(b"admin:test-admin").decode(), **(headers or {})},
             method=method,
         )
         with urlopen(req, timeout=5) as response:
@@ -110,7 +112,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(self.api("/stats")["count"], 2)
         self.assertIsNone(self.api("/stats")["until"])
         self.api(
-            path + "/" + a["id"], "PUT", {"nickname": "小花猫", "status": "已结稿"}
+            path + "/" + a["id"], "PUT", {**self.api(path + "/" + a["id"]), "status": "已结稿"}
         )
         self.assertEqual(names("deferred"), ["D"])
         from urllib.parse import quote
@@ -119,7 +121,7 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual(
                 self.api("/clients?q=" + quote(q))[0]["nickname"], "小花猫"
             )
-        self.api(path + "/" + a["id"], "PUT", a)
+        self.api(path + "/" + a["id"], "PUT", {**a, "revision": self.api(path + "/" + a["id"])["revision"]})
         self.assertEqual(names(), ["B", "C", "小花猫"])
 
     def test_receipts_and_concurrent_appends(self):
@@ -137,6 +139,7 @@ class WorkflowTest(unittest.TestCase):
                 target,
                 "POST",
                 {"platform": "支付宝", "amount": "0.10", "date": now.isoformat()},
+                {"Idempotency-Key": uuid4().hex},
             )
 
         with ThreadPoolExecutor(4) as executor:
@@ -145,6 +148,7 @@ class WorkflowTest(unittest.TestCase):
             target,
             "POST",
             {"amount": 999, "date": (now + timedelta(days=1)).isoformat()},
+            {"Idempotency-Key": uuid4().hex},
         )
         stats = self.api("/stats")
         self.assertIn(prev.year, stats["years"])
@@ -183,6 +187,47 @@ class WorkflowTest(unittest.TestCase):
         ledger = self.api("/export/beancount").decode()
         self.assertEqual(ledger.count(' * "=甲方"'), 6)
         self.assertIn("Income:Commissions  -60.00 CNY", ledger)
+
+    def test_concurrent_retry_and_stale_update(self):
+        order = self.api("/commissions", "POST", {"nickname": "小林"})
+        path = "/commissions/" + order["id"]
+        headers = {"Idempotency-Key": "same-receipt"}
+        def append(_):
+            return self.api(path + "/payments", "POST", {"amount": 25}, headers)
+        with ThreadPoolExecutor(4) as executor:
+            list(executor.map(append, range(6)))
+        self.assertEqual(len(self.api(path)["payments"]), 1)
+        with self.assertRaises(HTTPError) as conflict:
+            self.api(path, "PUT", {**order, "title": "旧版本"})
+        self.assertEqual(conflict.exception.code, 409)
+        with self.assertRaises(HTTPError) as invalid:
+            self.api(path + "/payments", "POST", {"amount": 26}, headers)
+        self.assertEqual(invalid.exception.code, 409)
+        self.api("/import", "POST", self.api("/export"))
+        self.assertEqual(len(append(None)["payments"]), 1)
+
+    def test_access_roles(self):
+        with self.assertRaises(HTTPError) as missing:
+            self.api("/commissions", headers={"Authorization": ""})
+        self.assertEqual(missing.exception.code, 401)
+        viewer = {"Authorization": "Basic " + base64.b64encode(b"viewer:test-viewer").decode()}
+        self.assertEqual(self.api("/commissions", headers=viewer), [])
+        for path, method, body in [("/export", "GET", None), ("/export/csv", "GET", None),
+                                   ("/export/beancount", "GET", None), ("/commissions", "POST", {}),
+                                   ("/import", "POST", {}), ("/examples", "DELETE", None)]:
+            with self.assertRaises(HTTPError) as forbidden:
+                self.api(path, method, body, viewer)
+            self.assertEqual(forbidden.exception.code, 403)
+
+    def test_names_and_page_snapshots(self):
+        for contact in ("001", "002"):
+            self.api("/commissions", "POST", {"nickname": "Alex", "contact": contact})
+        self.assertEqual({r["contact"] for r in self.api("/clients?q=Alex")}, {"001", "002"})
+        for page in ("overview", "queue", "receipts", "settings"):
+            snapshot = self.api("/workspace?page=" + page)
+            self.assertEqual(snapshot["count"], 2)
+            self.assertEqual("stats" in snapshot, page == "overview")
+            self.assertEqual(len(snapshot["records"]), 2 if page in ("overview", "queue") else 0)
 
     def test_all_time_includes_quiet_months(self):
         now = today()
@@ -262,7 +307,8 @@ class WorkflowTest(unittest.TestCase):
             path = "/commissions/" + record["id"]
             for target in ("进行中", "进行中", "已结稿", "已结稿"):
                 self.api(path + "/status", "PATCH", {"status": target})
-                self.assertEqual(self.api(path), {**record, "status": target})
+                current = self.api(path)
+                self.assertEqual(current, {**record, "status": target, "revision": current["revision"]})
             with self.assertRaises(HTTPError) as error:
                 self.api(path + "/status", "PATCH", {"status": "进行中"})
             self.assertEqual(error.exception.code, 409)
@@ -319,6 +365,14 @@ class WorkflowTest(unittest.TestCase):
         snapshot = self.api("/export")
         self.api("/commissions/" + r["id"], "DELETE")
         self.api("/import", "POST", snapshot)
+        self.assertEqual(self.api("/export"), snapshot)
+        current = self.api("/commissions/" + r["id"])
+        with self.assertRaises(HTTPError) as duplicate:
+            self.api("/commissions/" + r["id"], "PUT", {**current, "attachments": current["attachments"] * 2})
+        self.assertEqual(duplicate.exception.code, 422)
+        legacy = json.loads(json.dumps(snapshot))
+        legacy["commissions"][0]["attachments"] *= 2
+        self.api("/import", "POST", legacy)
         self.assertEqual(self.api("/export"), snapshot)
         self.assertEqual(
             self.api("/images/" + r["attachments"][0]["id"]), stream.getvalue()

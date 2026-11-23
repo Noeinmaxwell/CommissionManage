@@ -75,6 +75,7 @@ const state = {
 let loadId = 0,
   toastTimer,
   editing = null,
+  editingRevision = null,
   insertBefore = null,
   attachments = [],
   suggestTimer,
@@ -110,7 +111,7 @@ async function api(path, method = "GET", data) {
   const response = await fetch("/api" + path, {
     method,
     headers: data === undefined ? {} : { "Content-Type": "application/json" },
-    body: data === undefined ? undefined : JSON.stringify(data),
+    body: data instanceof File ? data : data === undefined ? undefined : JSON.stringify(data),
   });
   if (!response.ok) {
     let msg = "请求失败，请重试";
@@ -120,24 +121,23 @@ async function api(path, method = "GET", data) {
         ? detail.map((e) => `${e.loc.slice(1).join(".")} ${e.msg}`).join("，")
         : detail || msg;
     } catch {}
-    throw Error(msg);
+    throw Object.assign(Error(msg), {status: response.status});
   }
   return response.status === 204 ? null : response.json();
 }
 async function refresh() {
   const id = ++loadId;
-  const [records, settings, receipts, stats] = await Promise.all([
-    api("/commissions"),
-    api("/settings"),
-    api("/payments"),
-    api(
-      state.year
-        ? `/stats?year=${state.year}`
-        : state.months === "all" ? "/stats?all_time=true" : `/stats?months=${state.months}`,
-    ),
-  ]);
+  const requested = location.hash.slice(1);
+  const page = ["overview", "queue", "receipts", "settings"].includes(requested) ? requested : "overview";
+  const query = new URLSearchParams({page});
+  if (page === "overview") {
+    if (state.year) query.set("year", state.year);
+    else if (state.months === "all") query.set("all_time", "true");
+    else query.set("months", state.months);
+  }
+  const snapshot = await api("/workspace?" + query);
   if (id !== loadId) return;
-  Object.assign(state, { records, settings, receipts, stats });
+  Object.assign(state, {stats: null}, snapshot);
   render();
 }
 function button(label, action, ico = "", primary = false) {
@@ -288,18 +288,18 @@ function queueList() {
   const list = queueRecords(state.lane);
   const archived = state.lane === "archived";
   const q = state.query.trim().toLowerCase();
-  const matches = state.showUnmatched ? list : list.filter(r => matchesQuery(r, q));
+  const matches = list.map((r, i) => ({r, i, hit: !!q && matchesQuery(r, q)}))
+    .filter(({hit}) => !q || state.showUnmatched || hit);
   if (!matches.length)
     return `<div class="card">${empty(q ? "没有匹配的约稿" : archived ? "暂无已结稿记录" : state.lane === "deferred" ? "暂无延期约稿" : "暂无排队中的约稿", !q && !archived)}</div>`;
   return matches
-    .map((r, index) => {
-      const i = list.indexOf(r),
-        drag = !archived && !q;
+    .map(({r, i, hit}, index) => {
+      const drag = !archived && !q;
       const detail = briefDetails(r);
       const contact = r.contact
         ? `${esc(r.contact_type)} · ${esc(r.contact)}`
         : "未填写联系方式";
-      return `<article class="queue-card${q && state.showUnmatched && matchesQuery(r,q) ? " search-match" : ""}" data-key="${r.id}">
+      return `<article class="queue-card${state.showUnmatched && hit ? " search-match" : ""}" data-key="${r.id}">
         <div class="queue-rank">
           ${drag ? `<button class="grip" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
           <span class="pos">${String(i + 1).padStart(2, "0")}</span>
@@ -336,9 +336,16 @@ function queue() {
     `<div class="toolbar"><div class="tabs">${queueTabs()}</div><div class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称、账号或约稿" aria-label="搜索昵称、账号或约稿"><button class="search-eye" data-action="search-mode" aria-label="显示未匹配项" aria-pressed="${state.showUnmatched}" title="${state.showUnmatched ? "当前显示全部，点击隐藏未匹配项" : "当前隐藏未匹配项，点击显示全部"}">${icon(state.showUnmatched ? "eye" : "eyeOff")}</button></div></div><div id="queueList">${queueList()}</div>`
   );
 }
-function openCommissionDetail(key) {
-  const r = state.records.find(record => record.id === key);
-  if (!r) throw Error("约稿已更新，请刷新后查看");
+let detailRequest = 0;
+async function openCommissionDetail(key) {
+  const sequence = ++detailRequest;
+  const generation = loadId;
+  let r = state.records.find(record => record.id === key);
+  if (!r) {
+    r = await api("/commissions/" + encodeURIComponent(key));
+    if (generation !== loadId || sequence !== detailRequest) return;
+    state.records.push(r);
+  }
   const dialog = $("#commissionDetail");
   const fields = [
     ["联系方式", [r.contact_type, r.contact].filter(Boolean).join(" · ")],
@@ -381,19 +388,17 @@ function optionCard(key, label, ico) {
 function settingsPage() {
   return (
     title("设置") +
-    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>JSON 备份包含设置和原图，CSV 导出约稿与收款明细，Beancount 导出账本。注意仅支持json格式导入。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><a class="btn" href="/api/export/csv" download>导出 CSV</a><a class="btn" href="/api/export/beancount" download>导出 Beancount</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.records.some((r) => r.sample) ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a><a class="linkbtn" href="/llms.txt" target="_blank" rel="noopener">智能体调用指南</a></div></section></div>`
+    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>JSON 备份包含设置和原图，CSV 导出约稿与收款明细，Beancount 导出账本。注意仅支持json格式导入。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><a class="btn" href="/api/export/csv" download>导出 CSV</a><a class="btn" href="/api/export/beancount" download>导出 Beancount</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.has_samples ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a><a class="linkbtn" href="/llms.txt" target="_blank" rel="noopener">智能体调用指南</a></div></section></div>`
   );
 }
 function render() {
   hideChartTip();
-  const page = location.hash.slice(1),
-    pages = {
+  const pages = {
       overview: "工作台",
       queue: "排队列表",
       receipts: "收款记录",
       settings: "设置",
     };
-  state.page = Object.hasOwn(pages, page) ? page : "overview";
   $("#crumb").textContent = pages[state.page];
   document.title = pages[state.page] + " · 稿序";
   $$("nav [data-page]").forEach((a) => {
@@ -401,7 +406,7 @@ function render() {
     if (a.dataset.page === state.page) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  const count = queueRecords().length;
+  const count = state.count;
   $("#navCount").textContent = count;
   $("#navCount").hidden = !count;
   const views = {
@@ -511,6 +516,7 @@ function openEditor(key = null, before = null) {
   editorGeneration++;
   clearTimeout(suggestTimer);
   editing = key;
+  editingRevision = r.revision;
   insertBefore = before;
   attachments = (r.attachments || []).map((a) => ({ ...a }));
   readingFiles = 0;
@@ -598,6 +604,7 @@ async function submitRecord(e) {
     ...(!editing && state.page === "queue" && state.lane === "deferred"
       ? { queue: "deferred" }
       : {}),
+    ...(editing ? { revision: editingRevision } : {}),
     nickname: f.nickname.value,
     contact_type: f.contact_type.value,
     contact: f.contact.value,
@@ -626,6 +633,7 @@ async function submitRecord(e) {
     await refresh();
     toast("约稿已保存");
   } catch (error) {
+    if (error.status === 409) await refresh();
     if ($("#editor").open) $("#formError").textContent = error.message;
     else toast(error.message);
   } finally {
@@ -659,6 +667,7 @@ async function showSuggestions() {
     )
     .join("");
 }
+$("#confirm").addEventListener("close", () => { $("#confirmYes").onclick = null; });
 function confirmAction(title, message, action) {
   $("#confirmTitle").textContent = title;
   $("#confirmText").textContent = message;
@@ -726,7 +735,7 @@ async function onClick(event) {
       break;
     }
     case "detail":
-      openCommissionDetail(key);
+      await openCommissionDetail(key);
       break;
     case "edit":
       if ($("#commissionDetail").open) $("#commissionDetail").close();
@@ -901,17 +910,11 @@ document.addEventListener("change", async (e) => {
     if (el.id === "importFile" && el.files[0]) {
       const file = el.files[0];
       el.value = "";
-      let snapshot;
-      try {
-        snapshot = JSON.parse(await file.text());
-      } catch {
-        throw Error("请选择有效的 JSON 备份文件");
-      }
       confirmAction(
         "导入备份",
         `使用「${file.name}」中的数据替换当前全部约稿、收款、设置和图片？`,
         async () => {
-          await api("/import", "POST", snapshot);
+          await api("/import", "POST", file);
           await refresh();
           toast("备份已恢复");
         },
@@ -1093,7 +1096,7 @@ $("#clock").innerHTML =
     weekday: "short",
   }).format(new Date());
 window.addEventListener("hashchange", () => {
-  if (state.stats) render();
+  refresh().catch(err => toast(err.message));
   window.scrollTo(0, 0);
 });
 refresh().catch((err) => {
