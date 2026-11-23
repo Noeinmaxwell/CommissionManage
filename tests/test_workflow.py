@@ -97,7 +97,7 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(names(), ["B", "C"])
         from urllib.parse import quote
 
-        for q in ["小hmao", "x花m", "xiaohuamao", "xhm"]:
+        for q in ["小hmao", "x花m", "小hu", "xiaohuamao", "xhm"]:
             self.assertEqual(
                 self.api("/clients?q=" + quote(q))[0]["nickname"], "小花猫"
             )
@@ -129,6 +129,9 @@ class WorkflowTest(unittest.TestCase):
             {"amount": 999, "date": (now + timedelta(days=1)).isoformat()},
         )
         stats = self.api("/stats")
+        self.assertIn(prev.year, stats["years"])
+        by_year = self.api(f"/stats?year={prev.year}")
+        self.assertEqual(by_year["monthly"][prev.strftime("%Y-%m")], 1.05)
         self.assertEqual(stats["total"], 2.05)
         self.assertEqual(stats["monthly"][prev.strftime("%Y-%m")], 1.05)
         self.assertEqual(stats["current"], 1)

@@ -429,11 +429,11 @@ def matches(name, query):
         return True
     offsets = set()
     for variants in tokens(name):
+        starts = offsets | {0}
+        if any(v.startswith(query[i:]) for i in starts for v in variants):
+            return True
         offsets = {
-            i + len(v)
-            for i in offsets | {0}
-            for v in variants
-            if query.startswith(v, i)
+            i + len(v) for i in starts for v in variants if query.startswith(v, i)
         }
         if len(query) in offsets:
             return True
@@ -493,6 +493,7 @@ class Statistics(BaseModel):
     total: float
     average: float
     current: float
+    years: list[int]
     monthly: dict[str, float]
     platforms: dict[str, float]
 
@@ -503,7 +504,10 @@ class Statistics(BaseModel):
     summary="队列与收入统计，按支付日期归集",
     response_model=Statistics,
 )
-def stats(months: int = Query(6, ge=1, le=120)):
+def stats(
+    months: int = Query(6, ge=1, le=120),
+    year: int | None = Query(None, ge=1, le=9999, description="选择自然年查看历史收入"),
+):
     now = today()
     current = now.year * 12 + now.month - 1
     totals, sources = defaultdict(Decimal), defaultdict(Decimal)
@@ -519,15 +523,18 @@ def stats(months: int = Query(6, ge=1, le=120)):
                 sources[p["platform"]] += value
     total = sum(totals.values(), Decimal(0))
     span = current - min(totals, default=current) + 1
+    years = sorted({m // 12 for m in totals}, reverse=True)
+    first = year * 12 if year else current - months + 1
+    last = min(first + 11, current) if year else current
     return {
         "count": len(active),
         "until": max((r["planned"] for r in active if r["planned"]), default=None),
         "total": total,
         "average": round(total / span, 2),
         "current": totals[current],
+        "years": years,
         "monthly": {
-            f"{m // 12:04d}-{m % 12 + 1:02d}": totals[m]
-            for m in range(current - months + 1, current + 1)
+            f"{m // 12:04d}-{m % 12 + 1:02d}": totals[m] for m in range(first, last + 1)
         },
         "platforms": dict(sorted(sources.items(), key=lambda x: -x[1])),
     }

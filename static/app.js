@@ -62,6 +62,7 @@ const state = {
   settings: { contacts: [], platforms: [] },
   stats: null,
   months: 6,
+  year: null,
   archived: false,
   query: "",
 };
@@ -107,7 +108,11 @@ async function refresh() {
   const [records, settings, stats] = await Promise.all([
     api("/commissions"),
     api("/settings"),
-    api(`/stats?months=${state.months}`),
+    api(
+      state.year
+        ? `/stats?year=${state.year}`
+        : `/stats?months=${state.months}`,
+    ),
   ]);
   if (id !== loadId) return;
   Object.assign(state, { records, settings, stats });
@@ -173,7 +178,7 @@ function platforms() {
       return `${colors[i % colors.length]} ${start}% ${used}%`;
     })
     .join(",");
-  return `<div class="donut-content"><div class="donut" ${total ? `style="background:conic-gradient(${gradient})"` : ""}><div class="donut-inner"><strong>${Object.keys(platforms).length}</strong><small>收入平台</small></div></div><div class="legend">${names.map((n, i) => `<div title="¥${money(platforms[n] || 0)}"><i style="background:${colors[i % colors.length]}"></i><span>${esc(n)}</span><b>${total ? +(((platforms[n] || 0) * 100) / total).toFixed(1) : 0}%</b></div>`).join("")}</div></div>`;
+  return `<div class="donut-content"><div class="donut" ${total ? `style="background:conic-gradient(${gradient})"` : ""}><div class="donut-inner"><strong>${Object.keys(platforms).length}</strong><small>收入平台</small></div></div><div class="legend">${names.map((n, i) => `<div title="¥${money(platforms[n] || 0)}"><i style="background:${colors[i % colors.length]}"></i><span>${esc(n)}<small>¥${money(Object.hasOwn(platforms, n) ? platforms[n] : 0)}</small></span><b>${total ? +(((platforms[n] || 0) * 100) / total).toFixed(1) : 0}%</b></div>`).join("")}</div></div>`;
 }
 function empty(text, create = false) {
   return `<div class="empty"><span class="tile">${icon("queue")}</span><strong>${text}</strong>${create ? button("新建约稿", "new", "plus") : ""}</div>`;
@@ -184,7 +189,7 @@ function overview() {
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
     `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("过去总收入", s.total, "wallet")}${metric("每月平均收入", s.average, "trend", true)}</div></div>
- <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
+ <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
  <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="edit">${esc(r.nickname)}</button></td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
   );
 }
@@ -595,7 +600,8 @@ document.addEventListener("change", async (e) => {
   const el = e.target;
   try {
     if (el.id === "months") {
-      state.months = +el.value;
+      state.year = el.value.startsWith("y") ? Number(el.value.slice(1)) : null;
+      if (!state.year) state.months = Number(el.value);
       await refresh();
     }
     if (el.id === "files") await addFiles(el);
