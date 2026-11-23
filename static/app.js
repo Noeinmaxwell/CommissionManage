@@ -278,10 +278,9 @@ function queueTabs() {
   return Object.entries(queueNames).map(([key, label]) => {
     const selected = key === state.lane;
     const records = queueRecords(key);
-    const hits = records.filter(r => matchesQuery(r, q)).length;
-    const searching = !!q && (key !== "archived" || selected);
-    const highlight = searching && hits > 0 && !selected;
-    return `<button data-action="lane" data-lane="${key}" aria-pressed="${selected}" class="${selected ? "selected" : highlight ? "lane-match" : ""}">${label} ${searching ? hits + "/" : ""}${records.length}</button>`;
+    const hits = q ? records.filter(r => matchesQuery(r, q)).length : 0;
+    const highlight = hits > 0 && !selected;
+    return `<button data-action="lane" data-lane="${key}" aria-pressed="${selected}" class="${selected ? "selected" : highlight ? "lane-match" : ""}">${label} ${q ? hits + "/" : ""}${records.length}</button>`;
   }).join("");
 }
 
