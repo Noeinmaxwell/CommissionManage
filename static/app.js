@@ -535,14 +535,16 @@ function normalizeDay(raw) {
 function dateField(name, label, value) {
   return `<div class="field-label"><label>${label}<span class="datewrap"><input class="control day" name="${name}" aria-label="${label}" placeholder="如 260228" value="${esc(value)}" autocomplete="off"></span></label><span class="datepick"><input type="date" aria-label="选择${label}" value="${esc(value)}">${icon("calendar")}</span><small class="datehint"></small></div>`;
 }
-let stageMenuId = 0;
-function setupStageMenu(row) {
-  const input = row.querySelector('[name="stage"]');
-  const menu = row.querySelector(".stage-menu");
-  menu.id = "stage-options-" + ++stageMenuId;
+let suggestionMenuId = 0;
+function setupSuggestionMenu(field, getOptions, delay = 0) {
+  const input = field.querySelector('[role="combobox"]');
+  const menu = field.querySelector('[role="listbox"]');
+  menu.id = "input-options-" + ++suggestionMenuId;
   input.setAttribute("aria-controls", menu.id);
-  let active = -1;
+  let active = -1, sequence = 0, timer;
   function close() {
+    clearTimeout(timer);
+    sequence++;
     menu.hidden = true;
     input.setAttribute("aria-expanded", "false");
     input.removeAttribute("aria-activedescendant");
@@ -550,12 +552,21 @@ function setupStageMenu(row) {
   }
   function open() {
     close();
-    const options = ["稿费", "定金", "阶段款", "尾款"].filter(stage => stage.includes(input.value.trim()));
-    if (!options.length) return;
-    menu.innerHTML = options.map((stage, i) =>
-      `<div role="option" id="${menu.id}-${i}" aria-selected="false">${stage}</div>`).join("");
-    menu.hidden = false;
-    input.setAttribute("aria-expanded", "true");
+    const request = sequence;
+    function show(options) {
+      if (sequence !== request || document.activeElement !== input || !options.length) return;
+      menu.innerHTML = options.map((value, i) =>
+        `<div role="option" id="${menu.id}-${i}" aria-selected="false" title="${esc(value)}">${esc(value)}</div>`).join("");
+      menu.scrollTop = 0;
+      menu.hidden = false;
+      input.setAttribute("aria-expanded", "true");
+    }
+    if (delay) {
+      timer = setTimeout(async () => {
+        try { show(await getOptions(input.value.trim())); }
+        catch (error) { if (request === sequence) toast(error.message); }
+      }, delay);
+    } else show(getOptions(input.value.trim()));
   }
   function select(option) {
     input.value = option.textContent;
@@ -580,6 +591,7 @@ function setupStageMenu(row) {
         : (active <= 0 ? options.length - 1 : active - 1);
       options.forEach((option, i) => option.setAttribute("aria-selected", String(i === active)));
       input.setAttribute("aria-activedescendant", options[active].id);
+      options[active].scrollIntoView({block: "nearest"});
     } else if (!menu.hidden && e.key === "Enter" && active >= 0) {
       e.preventDefault();
       select(menu.children[active]);
@@ -593,7 +605,8 @@ function paymentRow(p = {}) {
   const el = document.createElement("div");
   el.className = "payment";
   el.innerHTML = `<label class="field-label">金额（元）<input class="control" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" value="${esc(p.amount)}" required></label><div class="field-label stage-field"><label>稿期阶段<input class="control" name="stage" role="combobox" aria-expanded="false" aria-autocomplete="list" autocomplete="off" placeholder="稿费" value="${esc(p.stage)}"></label><div class="stage-menu" role="listbox" aria-label="稿期阶段推荐" hidden></div></div>${dateField("paydate", "支付日期", p.date || "")}<label class="field-label">支付方式<select class="control" name="platform">${choices(state.settings.platforms, p.platform)}</select></label><button class="iconbtn" type="button" data-action="remove-payment" aria-label="移除此笔稿费">${icon("x")}</button>`;
-  setupStageMenu(el);
+  setupSuggestionMenu(el.querySelector(".stage-field"), query =>
+    ["稿费", "定金", "阶段款", "尾款"].filter(stage => stage.includes(query)));
   return el;
 }
 function openEditor(key = null, before = null) {
@@ -609,10 +622,14 @@ function openEditor(key = null, before = null) {
   busy = false;
   $("#commissionForm").innerHTML =
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
- <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority || before ? "checked" : ""} ${before ? "disabled" : ""}>插队</label></div></section>
+ <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><div class="field-label stage-field account-field"><label>联系账号<input class="control" name="contact" role="combobox" aria-autocomplete="list" aria-expanded="false" autocomplete="off" placeholder="账号或主页链接" value="${esc(r.contact)}"></label><div class="stage-menu" role="listbox" aria-label="联系账号推荐" hidden></div></div>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority || before ? "checked" : ""} ${before ? "disabled" : ""}>插队</label></div></section>
  <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><p class="helper">支付日期留空时保存为付款约定，收到款项后补填日期。</p><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="btn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
+  setupSuggestionMenu($("#editor .account-field"), async q => {
+    const params = new URLSearchParams({q, contact_type: $("#commissionForm").elements.contact_type.value});
+    return (await api("/clients?" + params)).map(client => client.contact);
+  }, 120);
   (r.payments || []).forEach((p) => $("#payments").append(paymentRow(p)));
   drawThumbs();
   $("#editor").showModal();

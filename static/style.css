@@ -1807,6 +1807,8 @@ button.metric:hover { border-color: #b7caef; }
   font-weight: 400;
   cursor: pointer;
 }
+.account-field .stage-menu { max-height: 7rem; overflow-y: auto; }
+.account-field [role="option"] { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stage-menu [role="option"]:hover,
 .stage-menu [aria-selected="true"] { background: var(--pale); }
 
