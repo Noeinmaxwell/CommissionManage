@@ -8,7 +8,7 @@ import re
 import sqlite3
 from collections import defaultdict
 from contextlib import asynccontextmanager, contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from importlib.resources import files
@@ -22,7 +22,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
 from pypinyin import lazy_pinyin
 
@@ -46,6 +46,7 @@ def parse_date(value):
 
 
 Day = Annotated[date, BeforeValidator(parse_date)]
+Queue = Literal["normal", "deferred"]
 Status = Literal["未开始", "进行中", "已结稿"]
 
 
@@ -85,17 +86,36 @@ class Commission(BaseModel):
     nickname: str = Field("", description="可留空，自动生成甲方编号")
     contact_type: str = ""
     contact: str = ""
+    title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
     requirements: str = ""
     brief_received: bool = False
     planned: Day | None = None
     started: Day | None = None
     status: Status = "未开始"
+    queue: Queue = "normal"
     payments: list[Payment] = Field(default_factory=list)
     attachments: list[Attachment] = Field(default_factory=list)
 
 
 class Saved(Commission):
     id: str
+    sample: bool = False
+
+
+class ClientHistory(BaseModel):
+    completed: int = 0
+    total: Decimal = Decimal(0)
+    latest: date | None = None
+
+
+class Card(Saved):
+    history: ClientHistory
+
+
+class Receipt(Payment):
+    commission_id: str
+    nickname: str
+    sample: bool
 
 
 class Snapshot(BaseModel):
@@ -131,16 +151,25 @@ async def lifespan(_):
             CREATE TABLE IF NOT EXISTS images(id TEXT PRIMARY KEY, job TEXT REFERENCES jobs(id) ON DELETE CASCADE, mime TEXT, bytes BLOB);
             CREATE TABLE IF NOT EXISTS settings(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
         """)
+        db.execute("BEGIN IMMEDIATE")
+        if "thumbnail" not in {
+            r["name"] for r in db.execute("PRAGMA table_info(images)")
+        }:
+            db.execute("ALTER TABLE images ADD COLUMN thumbnail BLOB")
         db.execute(
             "INSERT OR IGNORE INTO settings VALUES(1,?)",
             (Settings().model_dump_json(),),
         )
+        if db.execute("PRAGMA user_version").fetchone()[0] == 0:
+            if not db.execute("SELECT 1 FROM jobs LIMIT 1").fetchone():
+                load_examples(db)
+            db.execute("PRAGMA user_version=1")
     yield
 
 
 app = FastAPI(
     title="稿序 API",
-    version="1.0.0",
+    version="1.1.0",
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
@@ -178,11 +207,13 @@ def lookup(db, key):
     return dict(json.loads(row[0]), id=key)
 
 
-def active_keys(db):
+def active_keys(db, queue):
     return [
         r[0]
         for r in db.execute(
-            "SELECT id FROM jobs WHERE json_extract(body,'$.status') != '已结稿' ORDER BY pos, rowid"
+            """SELECT id FROM jobs WHERE json_extract(body,'$.status') != '已结稿'
+               AND COALESCE(json_extract(body,'$.queue'), 'normal') = ? ORDER BY pos, rowid""",
+            (queue,),
         )
     ]
 
@@ -191,8 +222,8 @@ def reorder(db, keys):
     db.executemany("UPDATE jobs SET pos=? WHERE id=?", enumerate(keys))
 
 
-def move(db, key, before):
-    keys = active_keys(db)
+def move(db, key, before, queue):
+    keys = active_keys(db, queue)
     if key not in keys or (before is not None and before not in keys):
         raise HTTPException(409, "队列已变化，请刷新")
     if key != before:
@@ -201,14 +232,24 @@ def move(db, key, before):
         reorder(db, keys)
 
 
-def postpone(db, key):
-    keys = active_keys(db)
-    if key not in keys:
+def transfer(db, key, queue):
+    item = lookup(db, key)
+    if item["status"] == "已结稿":
         raise HTTPException(409, "该约稿已结稿")
-    i = keys.index(key)
-    if i + 1 < len(keys):
-        keys[i : i + 2] = keys[i : i + 2][::-1]
-        reorder(db, keys)
+    if item.get("queue", "normal") != queue:
+        db.execute(
+            "UPDATE jobs SET body=json_set(body,'$.queue',?) WHERE id=?", (queue, key)
+        )
+        move(db, key, None, queue)
+
+
+def thumbnail_bytes(content):
+    with Image.open(BytesIO(content)) as picture:
+        picture.thumbnail((240, 240))
+        preview = ImageOps.exif_transpose(picture).convert("RGBA")
+        output = BytesIO()
+        preview.save(output, format="PNG", optimize=True)
+        return output.getvalue()
 
 
 def new_image(db, job, img, restore=False):
@@ -227,6 +268,7 @@ def new_image(db, job, img, restore=False):
             if not mime or len(content) > MAX_IMAGE:
                 raise ValueError()
             picture.verify()
+        thumbnail = thumbnail_bytes(content)
     except (
         ValueError,
         binascii.Error,
@@ -242,13 +284,17 @@ def new_image(db, job, img, restore=False):
         or db.execute("SELECT 1 FROM images WHERE id=?", (key,)).fetchone()
     ):
         raise HTTPException(422, "备份中的附件 ID 无效或重复")
-    db.execute("INSERT INTO images VALUES(?,?,?,?)", (key, job, mime, content))
+    db.execute(
+        "INSERT INTO images(id,job,mime,bytes,thumbnail) VALUES(?,?,?,?,?)",
+        (key, job, mime, content, thumbnail),
+    )
     return key
 
 
-def save(db, key, item, restore=False):
+def save(db, key, item, restore=False, sample=False):
     config = options(db)
     body = item.model_dump(mode="json", exclude={"attachments", "id"})
+    body["sample"] = sample
     body["nickname"] = item.nickname.strip() or f"甲方 {key[:6].upper()}"
     body["contact_type"] = item.contact_type or config["contacts"][0]
     for p in body["payments"]:
@@ -277,16 +323,77 @@ def save(db, key, item, restore=False):
     return dict(body, id=key)
 
 
+def histories(records):
+    """Resolve known accounts first; join a nickname-only order if the match is unique."""
+    accounts = defaultdict(set)
+    identities = {}
+    for r in records:
+        name = r["nickname"].strip().casefold()
+        scope = (bool(r.get("sample")), name)
+        contact = r["contact"].strip()
+        if contact:
+            key = (scope[0], "account", r["contact_type"], contact)
+            accounts[scope].add(key)
+            identities[r["id"]] = key
+    summaries = defaultdict(ClientHistory)
+    cutoff = today()
+    for r in records:
+        scope = (bool(r.get("sample")), r["nickname"].strip().casefold())
+        known = accounts[scope]
+        key = identities.setdefault(
+            r["id"], next(iter(known)) if len(known) == 1 else scope
+        )
+        history = summaries[key]
+        history.completed += int(r["status"] == "已结稿")
+        for payment in r["payments"]:
+            day = date.fromisoformat(payment["date"])
+            if day <= cutoff:
+                history.total += Decimal(payment["amount"])
+                history.latest = max(history.latest or day, day)
+    return {key: summaries[identity] for key, identity in identities.items()}
+
+
 @app.get(
     "/api/commissions",
     tags=["约稿"],
-    summary="按顺序列出约稿",
-    response_model=list[Saved],
+    summary="列出约稿及甲方历史，可按状态和队列筛选",
+    response_model=list[Card],
     response_model_exclude_none=True,
 )
-def list_commissions(status: Status | None = None):
+def list_commissions(status: Status | None = None, queue: Queue | None = None):
     with database() as db:
-        return [x for x in rows(db) if status is None or x["status"] == status]
+        records = rows(db)
+    history = histories(records)
+    return [
+        dict(x, history=history[x["id"]])
+        for x in records
+        if (status is None or x["status"] == status)
+        and (
+            queue is None
+            or (x["status"] != "已结稿" and x.get("queue", "normal") == queue)
+        )
+    ]
+
+
+@app.get(
+    "/api/payments",
+    tags=["收款"],
+    summary="列出所有甲方的逐笔收款，按支付日期倒序",
+    response_model=list[Receipt],
+)
+def receipts():
+    with database() as db:
+        entries = [
+            dict(
+                p,
+                commission_id=r["id"],
+                nickname=r["nickname"],
+                sample=r.get("sample", False),
+            )
+            for r in rows(db)
+            for p in r["payments"]
+        ]
+    return sorted(entries, key=lambda p: p["date"], reverse=True)
 
 
 @app.post(
@@ -302,7 +409,7 @@ def create(item: Commission, before: str | None = None):
         key = uuid4().hex
         saved = save(db, key, item)
         if before and item.status != "已结稿":
-            move(db, key, before)
+            move(db, key, before, item.queue)
         return saved
 
 
@@ -321,23 +428,32 @@ def detail(key: str):
 @app.put(
     "/api/commissions/{key}",
     tags=["约稿"],
-    summary="完整更新约稿，推迟预计开始日期会后移一位",
+    summary="完整更新约稿，推迟预计开始日期会进入延期队列",
     response_model=Saved,
     response_model_exclude_none=True,
 )
 def update(key: str, item: Commission):
     with database(True) as db:
         previous = lookup(db, key)
-        saved = save(db, key, item)
-        if item.status != "已结稿":
-            if previous["status"] == "已结稿":
-                move(db, key, None)
-            elif (
-                previous["planned"]
-                and item.planned
-                and item.planned > date.fromisoformat(previous["planned"])
-            ):
-                postpone(db, key)
+        if "title" not in item.model_fields_set:
+            item.title = previous.get("title", "")
+        original = previous.get("queue", "normal")
+        if "queue" not in item.model_fields_set:
+            item.queue = original
+        if (
+            previous["status"] != "已结稿"
+            and item.status != "已结稿"
+            and original == item.queue == "normal"
+            and previous["planned"]
+            and item.planned
+            and item.planned > date.fromisoformat(previous["planned"])
+        ):
+            item.queue = "deferred"
+        saved = save(db, key, item, sample=previous.get("sample", False))
+        if item.status != "已结稿" and (
+            previous["status"] == "已结稿" or original != item.queue
+        ):
+            move(db, key, None, item.queue)
         return saved
 
 
@@ -359,18 +475,32 @@ def remove(key: str):
 )
 def move_job(key: str, movement: Movement):
     with database(True) as db:
-        lookup(db, key)
-        move(db, key, movement.before)
+        row = lookup(db, key)
+        move(db, key, movement.before, row.get("queue", "normal"))
     return Response(status_code=204)
 
 
 @app.post(
-    "/api/commissions/{key}/defer", tags=["排队"], summary="延后一位", status_code=204
+    "/api/commissions/{key}/defer",
+    tags=["排队"],
+    summary="移入延期等待队尾",
+    status_code=204,
 )
 def defer_job(key: str):
     with database(True) as db:
-        lookup(db, key)
-        postpone(db, key)
+        transfer(db, key, "deferred")
+    return Response(status_code=204)
+
+
+@app.post(
+    "/api/commissions/{key}/resume",
+    tags=["排队"],
+    summary="恢复至正常队尾",
+    status_code=204,
+)
+def resume_job(key: str):
+    with database(True) as db:
+        transfer(db, key, "normal")
     return Response(status_code=204)
 
 
@@ -383,15 +513,16 @@ def defer_job(key: str):
 )
 def pay(key: str, payment: Payment):
     with database(True) as db:
-        item = Commission.model_validate(lookup(db, key))
+        previous = lookup(db, key)
+        item = Commission.model_validate(previous)
         item.payments.append(payment)
-        return save(db, key, item)
+        return save(db, key, item, sample=previous.get("sample", False))
 
 
 @app.get(
     "/api/images/{key}",
     tags=["附件"],
-    summary="获取原图",
+    summary="获取原图或最多 240 像素的缩略图",
     response_class=Response,
     responses={
         200: {
@@ -404,11 +535,19 @@ def pay(key: str, payment: Payment):
         }
     },
 )
-def image(key: str):
+def image(key: str, thumbnail: bool = False):
     with database() as db:
+        if thumbnail:
+            row = db.execute(
+                "SELECT thumbnail FROM images WHERE id=?", (key,)
+            ).fetchone()
+            if row and row["thumbnail"] is not None:
+                return Response(row["thumbnail"], media_type="image/png")
         row = db.execute("SELECT mime,bytes FROM images WHERE id=?", (key,)).fetchone()
         if not row:
             raise HTTPException(404, "图片不存在")
+        if thumbnail:
+            return Response(thumbnail_bytes(row["bytes"]), media_type="image/png")
         return Response(
             row["bytes"],
             media_type=row["mime"],
@@ -513,7 +652,11 @@ def stats(
     totals, sources = defaultdict(Decimal), defaultdict(Decimal)
     with database() as db:
         records = rows(db)
-    active = [r for r in records if r["status"] != "已结稿"]
+    active = [
+        r
+        for r in records
+        if r["status"] != "已结稿" and r.get("queue", "normal") == "normal"
+    ]
     for r in records:
         for p in r["payments"]:
             day = date.fromisoformat(p["date"])
@@ -581,7 +724,55 @@ def import_data(snapshot: Snapshot):
             (snapshot.settings.model_dump_json(),),
         )
         for item in snapshot.commissions:
-            save(db, item.id, item, restore=True)
+            save(db, item.id, item, restore=True, sample=item.sample)
+    return Response(status_code=204)
+
+
+def load_examples(db):
+    if db.execute(
+        "SELECT 1 FROM jobs WHERE json_extract(body,'$.sample')=1 LIMIT 1"
+    ).fetchone():
+        return
+    now = today()
+    for example in json.loads((ROOT / "examples.json").read_text(encoding="utf-8")):
+        example["attachments"] = [
+            {
+                "name": name,
+                "data": base64.b64encode(
+                    (ROOT / "examples" / filename).read_bytes()
+                ).decode(),
+            }
+            for name, filename in example.pop("reference_files", {}).items()
+        ]
+        for field in ("planned", "started"):
+            if field in example:
+                example[field] = now + timedelta(days=example[field])
+        for payment in example.get("payments", []):
+            payment["date"] = now + timedelta(days=payment["date"])
+        save(db, uuid4().hex, Commission.model_validate(example), sample=True)
+
+
+@app.post(
+    "/api/examples",
+    tags=["数据"],
+    summary="添加示例约稿和收款，有示例时保持现状",
+    status_code=204,
+)
+def add_examples():
+    with database(True) as db:
+        load_examples(db)
+    return Response(status_code=204)
+
+
+@app.delete(
+    "/api/examples",
+    tags=["数据"],
+    summary="仅清除标有示例的约稿及其收款",
+    status_code=204,
+)
+def remove_examples():
+    with database(True) as db:
+        db.execute("DELETE FROM jobs WHERE json_extract(body,'$.sample')=1")
     return Response(status_code=204)
 
 

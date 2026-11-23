@@ -63,7 +63,9 @@ const state = {
   stats: null,
   months: 6,
   year: null,
-  archived: false,
+  lane: "normal",
+  receipts: [],
+  receiptQuery: "",
   query: "",
 };
 let loadId = 0,
@@ -75,7 +77,22 @@ let loadId = 0,
   editorGeneration = 0,
   readingFiles = 0,
   busy = false;
-const active = () => state.records.filter((r) => r.status !== "已结稿");
+const queueNames = {
+  normal: "排队中",
+  deferred: "延期等待",
+  archived: "已结稿",
+};
+function queueRecords(lane = "normal") {
+  return state.records.filter((r) =>
+    lane === "archived"
+      ? r.status === "已结稿"
+      : r.status !== "已结稿" && r.queue === lane,
+  );
+}
+function sampleTag(record) {
+  return record.sample ? '<span class="sample-tag">示例</span>' : "";
+}
+
 function toast(msg) {
   $("#toast").textContent = msg;
   $("#toast").classList.add("toast-show");
@@ -105,9 +122,10 @@ async function api(path, method = "GET", data) {
 }
 async function refresh() {
   const id = ++loadId;
-  const [records, settings, stats] = await Promise.all([
+  const [records, settings, receipts, stats] = await Promise.all([
     api("/commissions"),
     api("/settings"),
+    api("/payments"),
     api(
       state.year
         ? `/stats?year=${state.year}`
@@ -115,7 +133,7 @@ async function refresh() {
     ),
   ]);
   if (id !== loadId) return;
-  Object.assign(state, { records, settings, stats });
+  Object.assign(state, { records, settings, receipts, stats });
   render();
 }
 function button(label, action, ico = "", primary = false) {
@@ -185,37 +203,64 @@ function empty(text, create = false) {
 }
 function overview() {
   const s = state.stats,
-    records = active().slice(0, 4);
+    records = queueRecords().slice(0, 4);
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
     `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("过去总收入", s.total, "wallet")}${metric("每月平均收入", s.average, "trend", true)}</div></div>
  <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
- <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="edit">${esc(r.nickname)}</button></td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
+ <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="edit">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
   );
 }
+function briefDetails(record) {
+  const title = record.title?.trim();
+  if (!title && !record.requirements && !record.attachments.length) return "";
+  return `<details class="brief"><summary>${esc(title || "查看约稿需求")}</summary><div class="brief-detail">${record.requirements ? `<p>${esc(record.requirements)}</p>` : record.attachments.length ? "" : '<p class="helper">暂无详细需求</p>'}${record.attachments.length ? `<div class="thumbs">${record.attachments.map((a, i) => `<div class="thumb">${thumbnailButton(a, i)}</div>`).join("")}</div>` : ""}</div></details>`;
+}
 function queueList() {
-  const list = state.archived
-    ? state.records.filter((r) => r.status === "已结稿")
-    : active();
+  const list = queueRecords(state.lane);
+  const archived = state.lane === "archived";
   const q = state.query.trim().toLowerCase(),
     matches = list.filter((r) =>
       (r.nickname + " " + r.contact).toLowerCase().includes(q),
     );
   if (!matches.length)
-    return `<div class="card">${empty(q ? "没有匹配的约稿" : state.archived ? "暂无已结稿记录" : "暂无排队中的约稿", !q && !state.archived)}</div>`;
+    return `<div class="card">${empty(q ? "没有匹配的约稿" : archived ? "暂无已结稿记录" : state.lane === "deferred" ? "暂无延期约稿" : "暂无排队中的约稿", !q && !archived)}</div>`;
   return matches
     .map((r, index) => {
       const i = list.indexOf(r),
-        drag = !state.archived && !q;
-      return `<article class="queue-card" data-key="${r.id}">${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}<span class="pos">${String(i + 1).padStart(2, "0")}</span><span class="avatar">${esc(Array.from(r.nickname)[0])}</span><div class="queue-body"><div class="queue-title"><button class="namebtn" data-action="edit">${esc(r.nickname)}</button>${statusTag(r.status)}</div><div class="queue-meta"><span>${r.contact ? esc(r.contact_type) + " · " + esc(r.contact) : "未填写联系方式"}</span><span class="${r.brief_received ? "received" : ""}">${r.brief_received ? "已交需求" : "待交需求"}</span><span>预计 ${esc(r.planned || "待定")}</span></div></div><div class="queue-actions">${state.archived ? "" : `<button class="btn" data-action="defer" ${i === list.length - 1 ? "disabled" : ""}>${icon("down")}延后</button>`}<button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button></div></article>${drag && index < matches.length - 1 ? `<div class="insert"><button data-action="insert" data-before="${list[i + 1].id}" aria-label="在此插入新约稿">＋ 插队</button></div>` : '<div class="list-end"></div>'}`;
+        drag = !archived && !q;
+      return `<article class="queue-card" data-key="${r.id}">${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}<span class="pos">${String(i + 1).padStart(2, "0")}</span><span class="avatar">${esc(Array.from(r.nickname)[0])}</span><div class="queue-body"><div class="queue-title"><button class="namebtn" data-action="edit">${esc(r.nickname)}</button>${statusTag(r.status)}${sampleTag(r)}</div><div class="queue-meta"><span>${r.contact ? esc(r.contact_type) + " · " + esc(r.contact) : "未填写联系方式"}</span><span class="${r.brief_received ? "received" : ""}">${r.brief_received ? "已交需求" : "待交需求"}</span><span>预计 ${esc(r.planned || "待定")}</span></div><div class="client-history"><span>已完成 <b>${r.history.completed}</b> 单</span><span>累计 <b>¥${money(r.history.total)}</b></span><span>最近收款 <b>${esc(r.history.latest || "—")}</b></span></div>${briefDetails(r)}</div><div class="queue-actions">${archived ? "" : state.lane === "deferred" ? `<button class="btn" data-action="resume">${icon("arrow")}恢复排队</button>` : `<button class="btn" data-action="defer">${icon("down")}延期</button>`}<button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button></div></article>${drag && index < matches.length - 1 ? `<div class="insert"><button data-action="insert" data-before="${list[i + 1].id}" aria-label="在此插入新约稿">＋ 插队</button></div>` : '<div class="list-end"></div>'}`;
     })
     .join("");
 }
 function queue() {
-  const done = state.records.length - active().length;
   return (
     title("排队列表", button("新建约稿", "new", "plus", true)) +
-    `<div class="toolbar"><div class="tabs"><button data-action="active" class="${!state.archived ? "selected" : ""}">排队中 ${active().length}</button><button data-action="archived" class="${state.archived ? "selected" : ""}">已结稿 ${done}</button></div><label class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称或联系方式" aria-label="搜索昵称或联系方式"></label></div><div id="queueList">${queueList()}</div>`
+    `<div class="toolbar"><div class="tabs">${Object.entries(queueNames)
+      .map(
+        ([key, label]) =>
+          `<button data-action="lane" data-lane="${key}" aria-pressed="${state.lane === key}" class="${state.lane === key ? "selected" : ""}">${label} ${queueRecords(key).length}</button>`,
+      )
+      .join(
+        "",
+      )}</div><label class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称或联系方式" aria-label="搜索昵称或联系方式"></label></div><div id="queueList">${queueList()}</div>`
+  );
+}
+function receiptList() {
+  const query = state.receiptQuery.trim().toLowerCase();
+  const entries = state.receipts.filter((p) =>
+    [p.nickname, p.stage, p.platform, p.date].some((v) =>
+      v.toLowerCase().includes(query),
+    ),
+  );
+  if (!entries.length) return empty(query ? "没有匹配的收款" : "暂无收款记录");
+  const cutoff = localDay();
+  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="edit">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+function receiptsPage() {
+  return (
+    title("收款记录") +
+    `<section class="card"><div class="card-head"><h2>${icon("wallet")}收款明细</h2><label class="search">${icon("search")}<input id="receiptQuery" aria-label="搜索收款记录" placeholder="搜索甲方、日期或平台" value="${esc(state.receiptQuery)}"></label></div><div id="receiptList">${receiptList()}</div></section>`
   );
 }
 function optionCard(key, label, ico) {
@@ -224,12 +269,17 @@ function optionCard(key, label, ico) {
 function settingsPage() {
   return (
     title("设置") +
-    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>导出约稿、收款、设置和原图。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a></div></section></div>`
+    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>导出约稿、收款、设置和原图。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.records.some((r) => r.sample) ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a></div></section></div>`
   );
 }
 function render() {
   const page = location.hash.slice(1),
-    pages = { overview: "工作台", queue: "排队列表", settings: "设置" };
+    pages = {
+      overview: "工作台",
+      queue: "排队列表",
+      receipts: "收款记录",
+      settings: "设置",
+    };
   state.page = Object.hasOwn(pages, page) ? page : "overview";
   $("#crumb").textContent = pages[state.page];
   document.title = pages[state.page] + " · 稿序";
@@ -238,15 +288,16 @@ function render() {
     if (a.dataset.page === state.page) a.setAttribute("aria-current", "page");
     else a.removeAttribute("aria-current");
   });
-  const count = active().length;
+  const count = queueRecords().length;
   $("#navCount").textContent = count;
   $("#navCount").hidden = !count;
-  $("#main").innerHTML =
-    state.page === "queue"
-      ? queue()
-      : state.page === "settings"
-        ? settingsPage()
-        : overview();
+  const views = {
+    overview,
+    queue,
+    settings: settingsPage,
+    receipts: receiptsPage,
+  };
+  $("#main").innerHTML = views[state.page]();
 }
 
 function choices(options, value) {
@@ -300,7 +351,7 @@ function openEditor(key = null, before = null) {
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
  <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label></div></section>
  <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div><datalist id="stages"><option>稿费</option><option>定金</option><option>阶段款</option><option>尾款</option></datalist></section>
- <section><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
+ <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="iconbtn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
   (r.payments || []).forEach((p) => $("#payments").append(paymentRow(p)));
   drawThumbs();
@@ -308,11 +359,15 @@ function openEditor(key = null, before = null) {
   $("#nickname").focus();
 }
 const imgSrc = (a) => a.data || "/api/images/" + encodeURIComponent(a.id);
+function thumbnailButton(a, i) {
+  const src = a.data || imgSrc(a) + "?thumbnail=true";
+  return `<button type="button" data-action="preview" data-index="${i}"><img loading="lazy" src="${esc(src)}" alt="${esc(a.name)}"></button>`;
+}
 function drawThumbs() {
   $("#thumbs").innerHTML = attachments
     .map(
       (a, i) =>
-        `<div class="thumb"><button type="button" data-action="preview" data-index="${i}"><img src="${esc(imgSrc(a))}" alt="${esc(a.name)}"></button><button type="button" class="remove" data-action="remove-image" data-index="${i}" aria-label="移除${esc(a.name)}">×</button></div>`,
+        `<div class="thumb">${thumbnailButton(a, i)}<button type="button" class="remove" data-action="remove-image" data-index="${i}" aria-label="移除${esc(a.name)}">×</button></div>`,
     )
     .join("");
 }
@@ -372,12 +427,16 @@ async function submitRecord(e) {
     };
   });
   const data = {
+    ...(!editing && state.page === "queue" && state.lane === "deferred"
+      ? { queue: "deferred" }
+      : {}),
     nickname: f.nickname.value,
     contact_type: f.contact_type.value,
     contact: f.contact.value,
     planned: normalizeDay(f.planned.value) || null,
     started: normalizeDay(f.started.value) || null,
     status: f.status.value,
+    title: f.brief_title.value.trim(),
     requirements: f.requirements.value,
     brief_received: f.brief_received.checked,
     payments,
@@ -483,20 +542,36 @@ async function onClick(event) {
     case "edit":
       openEditor(key);
       break;
+    case "resume":
     case "defer":
       b.disabled = true;
       try {
-        await api("/commissions/" + key + "/defer", "POST");
+        await api("/commissions/" + key + "/" + action, "POST");
         await refresh();
-        toast("已延后一位");
+        toast(action === "defer" ? "已移入延期等待" : "已恢复至正常队列");
       } finally {
         b.disabled = false;
       }
       break;
-    case "active":
-    case "archived":
-      state.archived = action === "archived";
+    case "lane":
+      state.lane = b.dataset.lane;
       render();
+      break;
+    case "load-examples":
+      await api("/examples", "POST");
+      await refresh();
+      toast("示例已加载");
+      break;
+    case "clear-examples":
+      confirmAction(
+        "清除示例数据",
+        "删除所有标有「示例」的约稿及其收款、附件，包括对示例的编辑。",
+        async () => {
+          await api("/examples", "DELETE");
+          await refresh();
+          toast("示例已清除");
+        },
+      );
       break;
     case "add-payment": {
       const row = paymentRow();
@@ -508,7 +583,10 @@ async function onClick(event) {
       b.closest(".payment").remove();
       break;
     case "preview": {
-      const a = attachments[+b.dataset.index];
+      const source = key
+        ? state.records.find((r) => r.id === key).attachments
+        : attachments;
+      const a = source[+b.dataset.index];
       $("#largeImage").src = imgSrc(a);
       $("#imageCaption").textContent = a.name;
       $("#lightbox").showModal();
@@ -578,6 +656,10 @@ document.addEventListener("submit", async (e) => {
 });
 document.addEventListener("input", (e) => {
   const el = e.target;
+  if (el.id === "receiptQuery") {
+    state.receiptQuery = el.value;
+    $("#receiptList").innerHTML = receiptList();
+  }
   if (el.id === "query") {
     state.query = el.value;
     $("#queueList").innerHTML = queueList();
@@ -681,7 +763,7 @@ async function dropOn(card, y) {
   clearDrag();
   if (!key || !target || key === target) return;
   const rect = card.getBoundingClientRect(),
-    keys = active()
+    keys = queueRecords(state.lane)
       .map((r) => r.id)
       .filter((id) => id !== key);
   const before =
@@ -738,7 +820,7 @@ document.addEventListener("keydown", async (e) => {
   if (!grip || !["ArrowUp", "ArrowDown"].includes(e.key)) return;
   e.preventDefault();
   const key = grip.closest(".queue-card").dataset.key,
-    keys = active().map((x) => x.id),
+    keys = queueRecords(state.lane).map((x) => x.id),
     i = keys.indexOf(key);
   if (
     (e.key === "ArrowUp" && i === 0) ||

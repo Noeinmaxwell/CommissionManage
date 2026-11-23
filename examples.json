@@ -1,0 +1,149 @@
+[
+  {
+    "nickname": "雾岛",
+    "contact_type": "微信",
+    "contact": "demo_wudao",
+    "status": "进行中",
+    "planned": -2,
+    "started": -2,
+    "brief_received": true,
+    "requirements": "海岸主题角色半身像，傍晚冷色光。",
+    "payments": [
+      {
+        "stage": "定金",
+        "amount": "320.00",
+        "platform": "微信",
+        "date": -3
+      }
+    ],
+    "title": "海岸角色半身像",
+    "reference_files": {
+      "海岸构图.png": "coast-study.png",
+      "配色参考.png": "coast-palette.png"
+    }
+  },
+  {
+    "nickname": "茶米",
+    "contact_type": "B站",
+    "contact": "茶米示例画室",
+    "planned": 3,
+    "brief_received": true,
+    "requirements": "两枚像素头像，一枚日间版，一枚夜间版。",
+    "payments": [
+      {
+        "stage": "定金",
+        "amount": "180.00",
+        "platform": "支付宝",
+        "date": -1
+      }
+    ],
+    "title": "昼夜像素头像"
+  },
+  {
+    "nickname": "蓝鲸",
+    "contact_type": "Discord",
+    "contact": "bluewhale_example",
+    "planned": 8,
+    "requirements": "新刊封面草图。",
+    "title": "新刊封面草图"
+  },
+  {
+    "nickname": "小满",
+    "contact_type": "微信",
+    "contact": "demo_xiaoman",
+    "queue": "deferred",
+    "planned": 12,
+    "requirements": "等待角色服装设定更新。",
+    "payments": [
+      {
+        "stage": "定金",
+        "amount": "240.00",
+        "platform": "微信",
+        "date": -9
+      }
+    ],
+    "title": "角色服装设定"
+  },
+  {
+    "nickname": "阿桃",
+    "contact_type": "QQ",
+    "contact": "示例阿桃",
+    "queue": "deferred",
+    "planned": 15,
+    "brief_received": true,
+    "requirements": "下月恢复，绘制一组表情。",
+    "title": "五枚聊天表情"
+  },
+  {
+    "nickname": "雾岛",
+    "contact_type": "微信",
+    "contact": "demo_wudao",
+    "status": "已结稿",
+    "started": -40,
+    "brief_received": true,
+    "requirements": "春日头像。",
+    "payments": [
+      {
+        "stage": "定金",
+        "amount": "200.00",
+        "platform": "微信",
+        "date": -42
+      },
+      {
+        "stage": "尾款",
+        "amount": "440.00",
+        "platform": "支付宝",
+        "date": -33
+      }
+    ],
+    "title": "春日头像"
+  },
+  {
+    "nickname": "雾岛",
+    "contact_type": "微信",
+    "contact": "demo_wudao",
+    "status": "已结稿",
+    "started": -98,
+    "payments": [
+      {
+        "stage": "稿费",
+        "amount": "780.00",
+        "platform": "支付宝",
+        "date": -92
+      }
+    ],
+    "title": "夜色人物立绘"
+  },
+  {
+    "nickname": "小满",
+    "contact_type": "微信",
+    "contact": "demo_xiaoman",
+    "status": "已结稿",
+    "started": -75,
+    "payments": [
+      {
+        "stage": "稿费",
+        "amount": "960.00",
+        "platform": "微信",
+        "date": -65
+      }
+    ],
+    "title": "夏季角色海报"
+  },
+  {
+    "nickname": "茶米",
+    "contact_type": "B站",
+    "contact": "茶米示例画室",
+    "status": "已结稿",
+    "started": -140,
+    "payments": [
+      {
+        "stage": "稿费",
+        "amount": "560.00",
+        "platform": "支付宝",
+        "date": -137
+      }
+    ],
+    "title": "书店主题头像"
+  }
+]

@@ -11,6 +11,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
 from urllib.error import HTTPError
@@ -83,18 +84,34 @@ class WorkflowTest(unittest.TestCase):
         a = self.api(path, "POST", {"nickname": "小花猫", "planned": "260228"})
         b = self.api(path, "POST", {"nickname": "B"})
         c = self.api(path + "?before=" + b["id"], "POST", {"nickname": "C"})
-        names = lambda: [
-            r["nickname"] for r in self.api(path) if r["status"] != "已结稿"
-        ]
+
+        def names(queue="normal"):
+            return [r["nickname"] for r in self.api(path + "?queue=" + queue)]
+
         self.assertEqual(names(), ["小花猫", "C", "B"])
-        self.api(path + "/" + a["id"], "PUT", {**a, "planned": "260301"})
-        self.assertEqual(names(), ["C", "小花猫", "B"])
+        delayed = self.api(path + "/" + a["id"], "PUT", {**a, "planned": "260301"})
+        self.assertEqual(delayed["queue"], "deferred")
+        self.assertEqual(names(), ["C", "B"])
         self.api(path + "/" + c["id"] + "/defer", "POST")
-        self.assertEqual(names(), ["小花猫", "C", "B"])
-        self.api(path + "/" + b["id"] + "/move", "POST", {"before": a["id"]})
-        self.assertEqual(names(), ["B", "小花猫", "C"])
-        self.api(path + "/" + a["id"], "PUT", {**a, "status": "已结稿"})
+        self.api(path + "/" + a["id"] + "/defer", "POST")
+        self.assertEqual(names("deferred"), ["小花猫", "C"])
+        d = self.api(
+            path + "?before=" + c["id"], "POST", {"nickname": "D", "queue": "deferred"}
+        )
+        self.assertEqual(names("deferred"), ["小花猫", "D", "C"])
+        self.api(path + "/" + c["id"] + "/move", "POST", {"before": a["id"]})
+        self.assertEqual(names("deferred"), ["C", "小花猫", "D"])
+        with self.assertRaises(HTTPError):
+            self.api(path + "/" + d["id"] + "/move", "POST", {"before": b["id"]})
+        self.assertEqual(names(), ["B"])
+        self.api(path + "/" + c["id"] + "/resume", "POST")
         self.assertEqual(names(), ["B", "C"])
+        self.assertEqual(self.api("/stats")["count"], 2)
+        self.assertIsNone(self.api("/stats")["until"])
+        self.api(
+            path + "/" + a["id"], "PUT", {"nickname": "小花猫", "status": "已结稿"}
+        )
+        self.assertEqual(names("deferred"), ["D"])
         from urllib.parse import quote
 
         for q in ["小hmao", "x花m", "小hu", "xiaohuamao", "xhm"]:
@@ -138,12 +155,106 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(stats["average"], 1.02)
         self.assertEqual(stats["platforms"], {"微信": 1.05, "支付宝": 1})
 
+    def test_client_history_and_all_payments(self):
+        now = today()
+        account = {"nickname": "小花猫", "contact_type": "QQ", "contact": "demo-A"}
+        self.api(
+            "/commissions",
+            "POST",
+            {
+                **account,
+                "status": "已结稿",
+                "payments": [{"amount": 45, "date": "260101"}],
+            },
+        )
+        self.api(
+            "/commissions",
+            "POST",
+            {
+                **account,
+                "nickname": "另一昵称",
+                "queue": "deferred",
+                "payments": [{"amount": 15, "date": now.isoformat()}],
+            },
+        )
+        self.api(
+            "/commissions", "POST", {"nickname": "小花猫", "payments": [{"amount": 10}]}
+        )
+
+        def card():
+            return next(r for r in self.api("/commissions") if r["status"] == "已结稿")
+
+        self.assertEqual(Decimal(card()["history"]["total"]), 70)
+        self.api(
+            "/commissions",
+            "POST",
+            {**account, "contact": "demo-B", "payments": [{"amount": 100}]},
+        )
+        self.api(
+            "/commissions",
+            "POST",
+            {
+                **account,
+                "payments": [
+                    {"amount": 200, "date": (now + timedelta(days=1)).isoformat()}
+                ],
+            },
+        )
+        history = card()["history"]
+        self.assertEqual(Decimal(history["total"]), 60)
+        self.assertEqual(history["completed"], 1)
+        self.assertEqual(history["latest"], now.isoformat())
+        entries = self.api("/payments")
+        self.assertEqual(len(entries), 5)
+        self.assertEqual(
+            [r["date"] for r in entries],
+            sorted([r["date"] for r in entries], reverse=True),
+        )
+
+    def test_examples_and_legacy_backup(self):
+        self.api(
+            "/import",
+            "POST",
+            {
+                "version": 1,
+                "settings": Settings().model_dump(),
+                "commissions": [
+                    {
+                        "id": "legacy",
+                        "nickname": "雾岛",
+                        "contact_type": "微信",
+                        "contact": "demo_wudao",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(self.api("/commissions?queue=normal")[0]["id"], "legacy")
+        self.api("/examples", "POST")
+        snapshot = self.api("/export")
+        self.api("/examples", "POST")
+        self.assertEqual(self.api("/export"), snapshot)
+        self.assertEqual(len(self.api("/payments")), 8)
+        self.assertEqual(self.api("/commissions/legacy")["queue"], "normal")
+        legacy = next(r for r in self.api("/commissions") if r["id"] == "legacy")
+        self.assertEqual(Decimal(legacy["history"]["total"]), 0)
+        self.api("/import", "POST", snapshot)
+        self.assertEqual(self.api("/export"), snapshot)
+        self.api("/examples", "DELETE")
+        self.assertEqual([r["id"] for r in self.api("/commissions")], ["legacy"])
+        self.assertEqual(self.api("/payments"), [])
+
     def test_backup_preserves_images_and_rolls_back_invalid_import(self):
         stream = BytesIO()
-        Image.new("RGB", (4, 4), "blue").save(stream, format="PNG")
+        Image.new("RGB", (900, 540), "blue").save(stream, format="PNG")
         data = base64.b64encode(stream.getvalue()).decode()
         r = self.api(
-            "/commissions", "POST", {"attachments": [{"name": "参考图", "data": data}]}
+            "/commissions",
+            "POST",
+            {
+                "title": "角色设定",
+                "requirements": "完整需求",
+                "attachments": [{"name": "参考图", "data": data}],
+            },
         )
         snapshot = self.api("/export")
         self.api("/commissions/" + r["id"], "DELETE")
@@ -152,6 +263,12 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(
             self.api("/images/" + r["attachments"][0]["id"]), stream.getvalue()
         )
+        thumb = self.api("/images/" + r["attachments"][0]["id"] + "?thumbnail=true")
+        with Image.open(BytesIO(thumb)) as preview:
+            self.assertEqual(preview.size, (240, 144))
+        saved = self.api("/commissions/" + r["id"])
+        self.assertEqual(saved["title"], "角色设定")
+        self.assertEqual(saved["requirements"], "完整需求")
         snapshot["commissions"][0]["attachments"][0]["data"] = "broken"
         with self.assertRaises(HTTPError) as error:
             self.api("/import", "POST", snapshot)
