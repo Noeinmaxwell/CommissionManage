@@ -137,6 +137,7 @@ async function refresh() {
   }
   const snapshot = await api("/workspace?" + query);
   if (id !== loadId) return;
+  $("#main").removeAttribute("aria-busy");
   Object.assign(state, {stats: null}, snapshot);
   render();
 }
@@ -1096,10 +1097,14 @@ $("#clock").innerHTML =
     weekday: "short",
   }).format(new Date());
 window.addEventListener("hashchange", () => {
-  refresh().catch(err => toast(err.message));
+  $("#main").textContent = "加载中…";
+  $("#main").setAttribute("aria-busy", "true");
+  refresh().catch(showLoadError);
   window.scrollTo(0, 0);
 });
-refresh().catch((err) => {
+function showLoadError(err) {
+  $("#main").removeAttribute("aria-busy");
   $("#main").innerHTML =
     `<div class="card"><p>${esc(err.message)}</p>${button("重新加载", "refresh")}</div>`;
-});
+}
+refresh().catch(showLoadError);
