@@ -214,7 +214,7 @@ function overview() {
 function briefDetails(record) {
   const title = record.title?.trim();
   if (!title && !record.requirements && !record.attachments.length) return "";
-  return `<details class="brief"><summary>${esc(title || "查看约稿需求")}</summary><div class="brief-detail">${record.requirements ? `<p>${esc(record.requirements)}</p>` : record.attachments.length ? "" : '<p class="helper">暂无详细需求</p>'}${record.attachments.length ? `<div class="thumbs">${record.attachments.map((a, i) => `<div class="thumb">${thumbnailButton(a, i)}</div>`).join("")}</div>` : ""}</div></details>`;
+  return `<div id="brief-${esc(record.id)}" class="brief-detail" hidden>${record.requirements ? `<p>${esc(record.requirements)}</p>` : record.attachments.length ? "" : '<p class="helper">暂无详细需求</p>'}${record.attachments.length ? `<div class="thumbs">${record.attachments.map((a, i) => `<div class="thumb">${thumbnailButton(a, i)}</div>`).join("")}</div>` : ""}</div>`;
 }
 function queueList() {
   const list = queueRecords(state.lane);
@@ -229,6 +229,7 @@ function queueList() {
     .map((r, index) => {
       const i = list.indexOf(r),
         drag = !archived && !q;
+      const detail = briefDetails(r);
       const contact = r.contact
         ? `${esc(r.contact_type)} · ${esc(r.contact)}`
         : "未填写联系方式";
@@ -236,31 +237,30 @@ function queueList() {
         <div class="queue-rank">
           ${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
           <span class="pos">${String(i + 1).padStart(2, "0")}</span>
-          <span class="avatar">${esc(Array.from(r.nickname)[0])}</span>
         </div>
-        <div class="queue-client">
-          <div class="queue-title">
-            <button class="namebtn" data-action="edit">${esc(r.nickname)}</button>
-            <span class="queue-labels">${statusTag(r.status)}${sampleTag(r)}</span>
+        <div class="queue-project">
+          ${detail
+            ? `<button class="project-title" data-action="brief" aria-expanded="false" aria-controls="brief-${esc(r.id)}">${esc(r.title?.trim() || "查看约稿需求")}</button>`
+            : `<button class="project-title" data-action="edit">${esc(r.nickname)}</button>`}
+          <div class="queue-client">
+            ${detail ? `<button class="namebtn" data-action="edit">${esc(r.nickname)}</button>` : ""}
+            ${sampleTag(r)}
+            <span class="queue-contact">${contact}</span>
           </div>
-          <div class="queue-contact">${contact}</div>
         </div>
-        <div class="queue-summary">
-          <div class="queue-meta">
-            <span>预计 ${esc(r.planned || "待定")}</span>
-            <span class="${r.brief_received ? "received" : ""}">${r.brief_received ? "已交需求" : "待交需求"}</span>
-          </div>
-          <div class="client-history">
-            <span>已完成 <b>${r.history.completed}</b> 单</span>
-            <span>累计 <b>¥${money(r.history.total)}</b></span>
-            <span>最近收款 <b>${esc(r.history.latest || "—")}</b></span>
-          </div>
+        <div class="queue-schedule">
+          <div class="queue-value"><span>预计开始</span><b>${esc(r.planned || "待定")}</b></div>
+          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span></div>
+        </div>
+        <div class="client-history">
+          <div class="queue-value"><span>累计收款</span><b>¥${money(r.history.total)}</b></div>
+          <div class="history-dates"><span>已完成 ${r.history.completed} 单</span><span>最近收款 ${esc(r.history.latest || "—")}</span></div>
         </div>
         <div class="queue-actions">
           ${archived ? "" : state.lane === "deferred" ? `<button class="btn" data-action="resume">${icon("arrow")}恢复排队</button>` : `<button class="btn" data-action="defer">${icon("down")}延期</button>`}
           <button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button>
         </div>
-        ${briefDetails(r)}
+        ${detail}
       </article>${drag && index < matches.length - 1 ? `<div class="insert"><button data-action="insert" data-before="${list[i + 1].id}" aria-label="在此插入新约稿">＋ 插队</button></div>` : '<div class="list-end"></div>'}`;
     })
     .join("");
@@ -571,6 +571,12 @@ async function onClick(event) {
     case "insert":
       openEditor(null, b.dataset.before);
       break;
+    case "brief": {
+      const panel = document.getElementById(b.getAttribute("aria-controls"));
+      panel.hidden = !panel.hidden;
+      b.setAttribute("aria-expanded", String(!panel.hidden));
+      break;
+    }
     case "edit":
       openEditor(key);
       break;
