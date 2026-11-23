@@ -1,6 +1,6 @@
 # 稿序 CommissionManage API 调用指南
 
-路径均相对于实例根地址。交互示例在 /docs，机器定义和每个端点的错误响应在 /openapi.json。GET 为读取，写入使用 application/json。实例无应用登录；服务端客户端可直接访问。浏览器页面应同源调用，服务未启用跨域 CORS。写请求携带不同源的 Origin 会返回 403。
+适用于 API 1.2.0。字段、响应类型和错误码以同一实例的 /openapi.json 为准。快照 version=1 是独立的备份格式版本。服务具有删除和全库替换权限，请部署在可信内网或受访问控制的代理之后。路径均相对于实例根地址。交互示例在 /docs，机器定义和每个端点的错误响应在 /openapi.json。GET 为读取，写入使用 application/json。实例无应用登录；服务端客户端可直接访问。浏览器页面应同源调用，服务未启用跨域 CORS。写请求携带不同源的 Origin 会返回 403。
 
 ## 找到一份约稿
 
@@ -40,14 +40,14 @@ payments 是有序数组，没有稿费 ID，也没有按 stage、amount 或旧�
 2. 仅改 order.payments[1].date 为实际支付日期（更正金额时仅改 amount）。保留其他行、其他可写字段和已有附件 id。
 3. PUT 同一路径，提交修改后的 order。409 时重新定位那一行，不能沿用旧下标。POST /payments 会追加一行，适合登记新款。
 
-追加接口 POST /api/commissions/{key}/payments 需要 Idempotency-Key 请求头。HTTP 头名大小写等效。键限 1–128 个可打印 ASCII 字符，排除空格。每份约稿独立去重；同单同键同体重试返回 200 和当前约稿，无重放标志；同单同键不同内容返回 409。不同约稿可复用键。重试时保留最初的请求体，包括哪些字段被省略。已结稿约稿仍可追加款项。
+追加接口 POST /api/commissions/{key}/payments 需要 Idempotency-Key 请求头。HTTP 头名大小写等效。键限 1–128 个可打印 ASCII 字符，排除空格。每份约稿独立去重；同单同键同体重试返回 200 和当前约稿，响应头 Idempotent-Replayed 为 true（首次写入为 false）；同单同键不同内容返回 409。不同约稿可复用键。重试时保留最初的请求体，包括哪些字段被省略。已结稿约稿仍可追加款项。
 
 ## 金额、日期与查询未收款
 
 - amount 为正数，最多 14 位数字、其中整数最多 12 位，小数最多两位。建议传 "1200.50"。负数、零、千位逗号和超精度金额返回 422。Payment 输出金额、history.total 和 agreed_total 用十进制字符串，小数位数可变；统计汇总用 JSON 数字，单位均为人民币元。
 - 日期建议 YYYY-MM-DD，两位月、两位日。也接受 YYYYMMDD 或 YYMMDD，六位日期补前缀 20，例如 991231 表示 2099-12-31。响应日期使用 YYYY-MM-DD。
 - 稿费 date 显式传 null 或 "" 表示约定；省略时取上海当天。GET /api/payments 按日期倒序返回有日期的行，包括未来日期。收入统计和甲方累计仅计截至上海今天的实收。
-- 查看未收金额：GET /api/commissions，读取每个 Card.agreed_total；跨单汇总时以十进制相加。单单详情、创建、更新和追加稿费的响应不含该汇总，可自行合计 payments 里 date=null 的金额。
+- 查看未填日期的付款约定：GET /api/commissions，读取每个 Card.agreed_total；跨单汇总时以十进制相加。单单详情、创建、更新和追加稿费的响应不含该汇总，可自行合计 payments 里 date=null 的金额。
 
 ## 开工与结稿
 
@@ -63,7 +63,7 @@ PATCH 请求「未开始」返回 422。非法迁移也可能收到「约稿状�
 
 ## 收入统计与甲方历史
 
-GET /api/stats 以支付日期归集。count 是正常队列未结稿单数；deferred_count 是延期队列未结稿单数。until 为正常队列中最晚的非空预计开始日，无日期则为空。years 为存在实收的年份，降序。
+GET /api/stats 以支付日期归集。count 是正常队列未结稿单数；deferred_count 是延期队列未结稿单数。until 为正常队列未结稿约稿中最晚的非空预计开始日（含过去日期），无日期则为空。years 为存在实收的年份，降序。
 total 为累计实收；current 为上海本月至今天实收；average 为累计实收除以首笔实收月至本月的自然月数（含零收入月，无收入为 0）。periods 的键 "3"、"6"、"12" 分别提供含本月的固定窗口总额与月均，分母固定为 3、6、12。platforms 按支付平台汇总累计实收。
 year、all_time、months 仅控制 monthly（键 YYYY-MM，缺收入月份补零）。year 优先，历史年覆盖全年，本年截至本月，未来年返回空映射；其次 all_time=true，从首笔实收月至本月，无实收时仅本月；否则取最近 months 个自然月。
 
@@ -80,7 +80,7 @@ GET /api/workspace?page=... 以 page 判断响应类型。所有页均返回 set
 | receipts | [] | receipts 全部有日期的收款行 |
 | settings | [] | 配置 |
 
-其他页的 receipts 为 []；仅 overview 返回 stats。可空字段在一些响应中会省略。
+所有页均有 records 和 receipts 数组。除 receipts 页外 receipts 为 []，仅 overview 有 stats。预览最多 8 单，按队列取全部请用 GET /api/commissions?queue=normal 或 deferred。
 
 ## 备份、示例与删除
 
@@ -96,7 +96,80 @@ DELETE /api/commissions/{key} 会删除该单、全部稿费、附件及该单�
 - 403：带 Origin 的写请求与服务不同源。
 - 404：路径 key 指向的约稿或图片不存在。
 - 409：按端点区分原因。PUT 检查 revision；PATCH 检查状态迁移；追加稿费检查同单幂等键；创建或移动的 before 目标不存在、已结稿或跨队都会冲突。移动一个已结稿的源单也会冲突。刷新相关资源后再决定是否重试。
-- 413：图片编码数据超过单图限制。422：请求参数、图片内容或快照无效。
-- 业务错误形如 {"detail":"备份中的约稿 ID 无效或重复"}；字段校验形如 {"detail":[{"loc":["body","payments",0,"amount"],"type":"greater_than","msg":"Input should be greater than 0"}]}，还可能含 input、ctx 等附加字段。
+- 413：Base64 载荷超过 16,777,216 个字符（12 MiB 原图的编码长度，前缀不计）。422：请求参数、图片内容或快照无效。
+- 业务错误形如 {"code":"invalid_backup_id","detail":"备份中的约稿 ID 无效或重复"}；字段校验形如 {"code":"validation_error","detail":[{"loc":["body","payments",0,"amount"],"type":"greater_than","msg":"Input should be greater than 0"}]}，还可能含 input、ctx 等附加字段。
 
 在 /docs 的 Examples 选择示例；机器读取 paths 下对应方法的 requestBody.content["application/json"].examples。先用普通新建响应的 id 和 revision，再执行修改。示例中的 <revision-from-GET>、<target-commission-id> 和 <existing-attachment-id> 需替换为真实值。创建用 URL 查询参数 before，移动用 JSON 请求体 before。
+
+## 整单编辑的空值规则
+
+先 GET 目标单。保留全部可写字段和数组中的每一行，仅修改需要变动的值，再以同一次 GET 的 revision 提交。三个 PUT 示例展示同一虚构约稿的三种编辑结果，不能替代目标单的 GET 结果。
+
+| 字段 | 创建／导入时省略 | PUT 时省略 | 显式 null | 显式空字符串 |
+|---|---|---|---|---|
+| nickname | 自动昵称 | 自动昵称 | 422 | 自动昵称，格式为 `甲方 AB12CD`，取 ID 前六个字符转大写 |
+| title | 空串 | 保留 | 422 | 清空 |
+| contact、requirements | 空串 | 清空 | 422 | 清空 |
+| contact_type | 首个配置项 | 首个配置项 | 422 | 首个配置项 |
+| planned、started | null | 清空日期 | 清空日期 | 422 |
+| status | 未开始 | 未开始 | 422 | 422 |
+| queue | normal | 保留，再应用延期规则 | 422 | 422 |
+| is_priority | false（新建插队会置 true） | 保留 | 422 | 422 |
+| payments、attachments | [] | 清空 | 422 | 422 |
+| payments[].date | 上海当天 | **该行按上海当天计入实收** | 付款约定 | 付款约定 |
+| payments[].stage、platform | 稿费、首个平台 | 同创建 | 422 | 同省略 |
+
+新建允许 {}，生成 32 位小写十六进制 ID 和自动昵称并占一个排队位置。导入时使用备份的 id。普通读写端点返回的约稿中，无日期的 planned、started、history.latest 会省略；无日期的稿费行始终带 `"date":null`。单独 /api/stats 的 until 无日期时为 null，在工作台嵌套响应中会省略。目前不记录结稿日期。
+
+## 版本和重试
+
+revision 是不透明字符串。服务在写入事务内比较 PUT 正文的 revision。ETag 使用双引号包围同一个值。仅传 If-Match 不能替代正文 revision。
+
+| 操作 | 版本变化 | 成功响应 |
+|---|---|---|
+| 新建 | 分配版本 | 201，详情、ETag 和 Location |
+| GET 详情、PUT 整单 | GET 只读；PUT 存储的正文文本有变化就换版本 | 200，详情和 ETag |
+| PATCH status | 状态改变时更新，重复相同状态保留 | 204 和 ETag |
+| defer、resume | 跨队更新，已在目标队列时保留版本和位置 | 204 和 ETag |
+| move | 仅重新排序，保留版本 | 204 和 ETag |
+| 追加稿费 | 新款更新，幂等重放保留当前版本 | 200，当前详情、ETag 和 Idempotent-Replayed |
+| 删除、导入 | 删除使原版本失效；导入重建的单各获新版本 | 204，重新读取仍存在的单 |
+
+收到 409 revision_conflict 时，可读取 current_revision，但要重新 GET 并合并最新内容后才可再次 PUT。直接把新版本号贴回旧副本会覆盖别人刚做的修改。204 响应未返回约稿字段，如需完整副本可重新 GET。
+
+## 队列、筛选和顺位
+
+| status | 省略 queue | normal | deferred |
+|---|---|---|---|
+| 省略 | 全部（含结稿） | 正常活动单 | 延期活动单 |
+| 未开始／进行中 | 两队中的对应状态 | 正常队中对应状态 | 延期队中对应状态 |
+| 已结稿 | 全部结稿单 | 200，[] | 200，[] |
+
+传空串 queue 或 status 返回 422；中文参数请交给客户端 URL 编码，如 curl 的 --data-urlencode。列表按库内整数顺位升序，同顺位按插入顺序。两队分别重排，可有相同顺位。API 不返回 position，按数组顺序展示，对指定队列取子序列即可。相同支付日期的明细沿用约稿列表顺序，同单沿用 payments 数组顺序。
+
+创建时 before 在 URL，写进 JSON 会作为未知字段忽略。省略或 ?before= 均尾插，保留提交的标签。活动单指定同队目标时插在目标前，两队都适用，显式 false 也会被置 true。跨队、无目标、目标结稿各返回 409。创建已结稿单时完全忽略 before。move 的 before 在 JSON，缺失或 null 为队尾，空串当作目标 ID，指向自己时保留位置。
+延期与恢复移至目标队尾。PUT 仅当编辑前后均活动、原队列与提交队列均 normal、且已有 planned 被推迟才自动延期。原队 deferred 显式改 normal 并同时推迟日期，结果是正常队尾；已结稿单通过 PUT 重开也在目标队尾。
+
+## 幂等摘要
+
+Idempotency-Key 在每单内唯一，长度 1–128，字节范围 0x21–0x7E。规范化仅使用已显式提供的已知字段：金额转 Python Decimal.normalize() 后的字符串，日期归一到 YYYY-MM-DD，空日期归一到 null。stage、platform 保留提交值。按键排序，用 Python json.dumps(sort_keys=True) 的默认空格与 ASCII 转义生成文本，取 UTF-8 的 SHA-256 小写十六进制。默认日期、平台和阶段在摘要计算后应用。
+例如 {"amount":"200.00"} 与 {"amount":200} 的摘要输入都是 `{"amount": "2E+2"}`，摘要为 882b2f7a43852ca48c156b572405d5c731f8f2e835226440b04242ba7be9c63a。显式传默认阶段与省略阶段不同；日期 "" 与 null 相同，与省略不同。重放只保证该 token 不会追加第二次；返回的是当前约稿，即使原稿费行已被 PUT 删除仍会成功重放。
+备份导入检查 token、digest 格式及同单 token 唯一性，原样恢复摘要，不从现有稿费重算。保留备份中的原值。
+
+## 金额和财务导出
+
+金额以 CNY 计。客户端应发送正的十进制字符串，如 "0.07" 或 "1200.50"；取值不超过 999999999999.99。服务兼容部分可由 Decimal 等值解析的旧输入写法。输出行与卡片合计是十进制字符串（如 "0"、"12.3"、"740.00"），使用 Decimal 求和。统计金额为 JSON number，月均按十进制就近舍入到分，恰好半分时取偶；无收入为 0。若业务把未来日期的稿费也当作待收，应将 agreed_total 与该单所有 date 晚于上海今天的金额相加。日期必须是真实日历日。
+下载名为 commission-YYYY-MM-DD 加扩展名，日期按上海当地日历，见 Content-Disposition。CSV 和 Beancount 包含示例及未来日期行，跳过无日期约定，均只供导出。
+- CSV 使用 UTF-8 BOM、逗号和 CRLF。列依次为：约稿ID,甲方,联系方式,联系账号,约稿内容,需求说明,队列,状态,预计开始,实际开始,支付日期,稿期阶段,支付方式,金额(CNY)。没有有日期稿费的约稿仍占一行，收款列为空。字段含逗号、引号或换行时用双引号包围，内部双引号写两次。公式样式的文本前加单引号。
+- Beancount 使用 UTF-8，币种 CNY。开户日为首笔有日期款项的日期，无交易时取上海今天。每笔输出一条交易，收款人为甲方昵称，摘要连接标题与阶段，元数据为 commission_id 和 platform。Assets:CommissionReceipts 借记，Income:Commissions 贷记，使用两位小数。
+
+## 附件与备份边界
+
+参考图接受 PNG、JPEG、GIF、WebP。每张原图最多 12 MiB（12,582,912 字节），对应 Base64 载荷最多 16,777,216 个字符，data URL 前缀不计。普通新增图片提供 data，即使同时提供 id 也会分配新 ID。无 data 时只能引用该单已有 id，否则 422；普通 PUT 不能重复引用一个 ID。仅删除一张图时，在完整 PUT 里只去掉该引用。普通详情返回 id/name，备份另含无前缀的 Base64 data。
+原图请求省略 thumbnail 或传 false。true 返回保持宽高比、长边最多 240px、不会放大的 PNG；字节数可能比原图大。图片响应使用 private, no-store。
+全量导入会删除快照以外的约稿及其稿费、图片与幂等键，并替换设置。快照中的 brief_received 会重新计算，sample 会还原。没有固定的快照总字节上限，代理可能另有限制。导入失败整个事务回滚。
+设置 PUT 是全量替换，省略列表使用程序默认值，{} 恢复两组默认选项。去首尾空白、跳过空项、保序去重后，每组至少一项，否则 422。首项只影响以后应用默认值时的选择，既有记录无需随设置改写。
+
+## 错误处理顺序
+
+写请求先检查 Origin（403 origin_mismatch），再校验参数、头和正文（422 validation_error），通过后查路径资源（404 commission_not_found／image_not_found），再执行对应业务校验。404 与 409 可直接按 code 分支。冲突码包括 revision_conflict、invalid_transition、archived_commission、idempotency_key_conflict、before_target_not_found、before_target_archived、before_target_wrong_queue。字段错误的 detail 为数组，可包含 input 和 ctx；图片、备份等业务错误的 detail 为字符串。405 的 Allow 头列出该路径支持的方法，500 可能返回纯文本。
