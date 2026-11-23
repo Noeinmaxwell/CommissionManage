@@ -760,15 +760,40 @@ h3 {
   padding: 10px 14px;
   box-shadow: var(--shadow);
   transition:
-    border-color 0.16s,
-    opacity 0.16s;
+    transform 180ms ease-out,
+    box-shadow 180ms ease-out;
 }
 .queue-card.dragging {
-  opacity: 0.35;
+  position: relative;
+  z-index: 2;
+  transition: none;
+  border-color: #7998e5;
+  box-shadow: 0 8px 22px #29476c35;
+  cursor: grabbing;
 }
-.queue-card.over {
-  border-top-color: #5b83e2;
-  box-shadow: inset 0 2px #5b83e2, var(--shadow);
+.queue-card.search-match,
+.tabs button.lane-match {
+  border-color: #d7ae4c;
+  background: #fff4c8;
+}
+.tabs button.lane-match {
+  color: #714f05;
+}
+.search-eye {
+  display: grid;
+  place-items: center;
+  min-width: 30px;
+  height: 28px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+}
+.search input {
+  min-width: 0;
+}
+.queue-actions .advance {
+  background: var(--pale);
+  border-color: #c3d3f4;
+  color: #324f9e;
 }
 .queue-rank {
   grid-area: rank;
@@ -825,10 +850,14 @@ h3 {
   text-align: left;
 }
 .queue-client .namebtn {
-  color: #42516a;
-  font-size: 13px;
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.4;
 }
 .queue-contact {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 .queue-schedule {
@@ -863,6 +892,11 @@ h3 {
   gap: 4px;
   white-space: nowrap;
 }
+@media (max-width: 600px) {
+  .toolbar .search {
+    flex-basis: 100%;
+  }
+}
 @container (max-width: 820px) {
   .queue-card {
     grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto;
@@ -891,7 +925,11 @@ h3 {
     padding: 0;
   }
   .queue-actions {
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: auto auto;
+  }
+  .queue-actions .advance {
+    grid-column: 1 / -1;
   }
   .queue-schedule,
   .client-history {
@@ -1649,10 +1687,11 @@ main > * {
 }
 .project-title {
   padding: 0;
-  color: var(--ink);
-  font-size: 16px;
+  margin-right: 6px;
+  color: #495d79;
+  font-size: 13px;
   line-height: 1.4;
-  font-weight: 650;
+  font-weight: 550;
   text-align: left;
   overflow-wrap: anywhere;
 }

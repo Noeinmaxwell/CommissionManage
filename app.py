@@ -329,19 +329,18 @@ def histories(records):
     identities = {}
     for r in records:
         name = r["nickname"].strip().casefold()
-        scope = (bool(r.get("sample")), name)
         contact = r["contact"].strip()
         if contact:
-            key = (scope[0], "account", r["contact_type"], contact)
-            accounts[scope].add(key)
+            key = (r["contact_type"], contact)
+            accounts[name].add(key)
             identities[r["id"]] = key
     summaries = defaultdict(ClientHistory)
     cutoff = today()
     for r in records:
-        scope = (bool(r.get("sample")), r["nickname"].strip().casefold())
-        known = accounts[scope]
+        name = r["nickname"].strip().casefold()
+        known = accounts[name]
         key = identities.setdefault(
-            r["id"], next(iter(known)) if len(known) == 1 else scope
+            r["id"], next(iter(known)) if len(known) == 1 else name
         )
         history = summaries[key]
         history.completed += int(r["status"] == "已结稿")
@@ -477,6 +476,24 @@ def move_job(key: str, movement: Movement):
     with database(True) as db:
         row = lookup(db, key)
         move(db, key, movement.before, row.get("queue", "normal"))
+    return Response(status_code=204)
+
+
+class StatusChange(BaseModel):
+    status: Literal["进行中", "已结稿"]
+
+
+@app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿", status_code=204)
+def change_status(key: str, change: StatusChange):
+    with database(True) as db:
+        current = lookup(db, key)["status"]
+        expected = "未开始" if change.status == "进行中" else "进行中"
+        if current not in (expected, change.status):
+            raise HTTPException(409, "约稿状态已变化，请刷新")
+        db.execute(
+            "UPDATE jobs SET body=json_set(body,'$.status',?) WHERE id=?",
+            (change.status, key),
+        )
     return Response(status_code=204)
 
 

@@ -211,6 +211,20 @@ class WorkflowTest(unittest.TestCase):
             sorted([r["date"] for r in entries], reverse=True),
         )
 
+    def test_status_actions(self):
+        for lane in ("normal", "deferred"):
+            record = self.api("/commissions", "POST", {
+                "nickname": lane, "queue": lane, "payments": [{"amount": 20}]
+            })
+            path = "/commissions/" + record["id"]
+            for target in ("进行中", "进行中", "已结稿", "已结稿"):
+                self.api(path + "/status", "PATCH", {"status": target})
+                self.assertEqual(self.api(path), {**record, "status": target})
+            with self.assertRaises(HTTPError) as error:
+                self.api(path + "/status", "PATCH", {"status": "进行中"})
+            self.assertEqual(error.exception.code, 409)
+            self.assertEqual(self.api("/commissions?queue=" + lane), [])
+
     def test_examples_and_legacy_backup(self):
         self.api(
             "/import",
@@ -236,7 +250,10 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(len(self.api("/payments")), 8)
         self.assertEqual(self.api("/commissions/legacy")["queue"], "normal")
         legacy = next(r for r in self.api("/commissions") if r["id"] == "legacy")
-        self.assertEqual(Decimal(legacy["history"]["total"]), 0)
+        shared = [r for r in self.api("/commissions") if r["contact"] == "demo_wudao"]
+        self.assertGreater(len(shared), 1)
+        self.assertGreater(Decimal(legacy["history"]["total"]), 0)
+        self.assertTrue(all(r["history"] == legacy["history"] for r in shared))
         self.api("/import", "POST", snapshot)
         self.assertEqual(self.api("/export"), snapshot)
         self.api("/examples", "DELETE")

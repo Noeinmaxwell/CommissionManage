@@ -2,6 +2,8 @@
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => Array.from(document.querySelectorAll(selector));
 const paths = {
+  eye: '<path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="m3 3 18 18M9 5.5a12 12 0 0 1 3-.5c6 0 10 7 10 7a18 18 0 0 1-3.3 4.2M6 6.6A20 20 0 0 0 2 12s4 7 10 7a12 12 0 0 0 4.4-.9"/>',
   overview:
     '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   queue:
@@ -67,6 +69,7 @@ const state = {
   receipts: [],
   receiptQuery: "",
   query: "",
+  showUnmatched: false,
 };
 let loadId = 0,
   toastTimer,
@@ -216,13 +219,29 @@ function briefDetails(record) {
   if (!title && !record.requirements && !record.attachments.length) return "";
   return `<div id="brief-${esc(record.id)}" class="brief-detail" hidden>${record.requirements ? `<p>${esc(record.requirements)}</p>` : record.attachments.length ? "" : '<p class="helper">暂无详细需求</p>'}${record.attachments.length ? `<div class="thumbs">${record.attachments.map((a, i) => `<div class="thumb">${thumbnailButton(a, i)}</div>`).join("")}</div>` : ""}</div>`;
 }
+function matchesQuery(record, query) {
+  return [record.nickname, record.contact, record.title].some(value =>
+    (value || "").toLowerCase().includes(query)
+  );
+}
+
+function queueTabs() {
+  const q = state.query.trim().toLowerCase();
+  return Object.entries(queueNames).map(([key, label]) => {
+    const selected = key === state.lane;
+    const records = queueRecords(key);
+    const hits = records.filter(r => matchesQuery(r, q)).length;
+    const searching = !!q && (key !== "archived" || selected);
+    const highlight = searching && hits > 0 && !selected;
+    return `<button data-action="lane" data-lane="${key}" aria-pressed="${selected}" class="${selected ? "selected" : highlight ? "lane-match" : ""}">${label} ${searching ? hits + "/" : ""}${records.length}</button>`;
+  }).join("");
+}
+
 function queueList() {
   const list = queueRecords(state.lane);
   const archived = state.lane === "archived";
-  const q = state.query.trim().toLowerCase(),
-    matches = list.filter((r) =>
-      (r.nickname + " " + r.contact).toLowerCase().includes(q),
-    );
+  const q = state.query.trim().toLowerCase();
+  const matches = state.showUnmatched ? list : list.filter(r => matchesQuery(r, q));
   if (!matches.length)
     return `<div class="card">${empty(q ? "没有匹配的约稿" : archived ? "暂无已结稿记录" : state.lane === "deferred" ? "暂无延期约稿" : "暂无排队中的约稿", !q && !archived)}</div>`;
   return matches
@@ -233,20 +252,18 @@ function queueList() {
       const contact = r.contact
         ? `${esc(r.contact_type)} · ${esc(r.contact)}`
         : "未填写联系方式";
-      return `<article class="queue-card" data-key="${r.id}">
+      return `<article class="queue-card${q && state.showUnmatched && matchesQuery(r,q) ? " search-match" : ""}" data-key="${r.id}">
         <div class="queue-rank">
-          ${drag ? `<button class="grip" draggable="true" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
+          ${drag ? `<button class="grip" title="拖动排序，或用上下方向键移动" aria-label="移动${esc(r.nickname)}">${icon("grip")}</button>` : ""}
           <span class="pos">${String(i + 1).padStart(2, "0")}</span>
         </div>
         <div class="queue-project">
-          ${detail
-            ? `<button class="project-title" data-action="brief" aria-expanded="false" aria-controls="brief-${esc(r.id)}">${esc(r.title?.trim() || "查看约稿需求")}</button>`
-            : `<button class="project-title" data-action="edit">${esc(r.nickname)}</button>`}
           <div class="queue-client">
-            ${detail ? `<button class="namebtn" data-action="edit">${esc(r.nickname)}</button>` : ""}
+            <button class="namebtn" data-action="edit">${esc(r.nickname)}</button>
             ${sampleTag(r)}
-            <span class="queue-contact">${contact}</span>
           </div>
+          ${detail ? `<button class="project-title" data-action="brief" aria-expanded="false" aria-controls="brief-${esc(r.id)}">${esc(r.title?.trim() || "查看约稿需求")}</button>` : ""}
+          <span class="queue-contact">${contact}</span>
         </div>
         <div class="queue-schedule">
           <div class="queue-value"><span>预计开始</span><b>${esc(r.planned || "待定")}</b></div>
@@ -257,6 +274,7 @@ function queueList() {
           <div class="history-dates"><span>已完成 ${r.history.completed} 单</span><span>最近收款 ${esc(r.history.latest || "—")}</span></div>
         </div>
         <div class="queue-actions">
+          ${archived ? "" : `<button class="btn advance" data-action="status" data-status="${r.status === "进行中" ? "已结稿" : "进行中"}">${r.status === "进行中" ? "结稿" : "开始"}</button>`}
           ${archived ? "" : state.lane === "deferred" ? `<button class="btn" data-action="resume">${icon("arrow")}恢复排队</button>` : `<button class="btn" data-action="defer">${icon("down")}延期</button>`}
           <button class="iconbtn" data-action="edit" aria-label="编辑${esc(r.nickname)}">${icon("edit")}</button>
         </div>
@@ -268,14 +286,7 @@ function queueList() {
 function queue() {
   return (
     title("排队列表", button("新建约稿", "new", "plus", true)) +
-    `<div class="toolbar"><div class="tabs">${Object.entries(queueNames)
-      .map(
-        ([key, label]) =>
-          `<button data-action="lane" data-lane="${key}" aria-pressed="${state.lane === key}" class="${state.lane === key ? "selected" : ""}">${label} ${queueRecords(key).length}</button>`,
-      )
-      .join(
-        "",
-      )}</div><label class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称或联系方式" aria-label="搜索昵称或联系方式"></label></div><div id="queueList">${queueList()}</div>`
+    `<div class="toolbar"><div class="tabs">${queueTabs()}</div><div class="search">${icon("search")}<input id="query" value="${esc(state.query)}" placeholder="搜索昵称、账号或约稿" aria-label="搜索昵称、账号或约稿"><button class="search-eye" data-action="search-mode" aria-label="显示未匹配项" aria-pressed="${state.showUnmatched}" title="${state.showUnmatched ? "当前显示全部，点击隐藏未匹配项" : "当前隐藏未匹配项，点击显示全部"}">${icon(state.showUnmatched ? "eye" : "eyeOff")}</button></div></div><div id="queueList">${queueList()}</div>`
   );
 }
 function receiptList() {
@@ -591,6 +602,21 @@ async function onClick(event) {
         b.disabled = false;
       }
       break;
+    case "status":
+      b.disabled = true;
+      try {
+        await api("/commissions/" + key + "/status", "PATCH", { status: b.dataset.status });
+        await refresh();
+        toast(b.dataset.status);
+      } finally {
+        b.disabled = false;
+      }
+      break;
+    case "search-mode":
+      state.showUnmatched = !state.showUnmatched;
+      render();
+      $('[data-action="search-mode"]').focus();
+      break;
     case "lane":
       state.lane = b.dataset.lane;
       render();
@@ -700,6 +726,7 @@ document.addEventListener("input", (e) => {
   }
   if (el.id === "query") {
     state.query = el.value;
+    $(".toolbar .tabs").innerHTML = queueTabs();
     $("#queueList").innerHTML = queueList();
   }
   if (el.id === "nickname") {
@@ -772,86 +799,105 @@ document.addEventListener("focusout", (e) => {
         $("#suggestions")?.replaceChildren();
     }, 0);
 });
-let dragKey = null,
-  overKey = null,
-  touch = null;
-function targetAt(y, x) {
-  return document.elementFromPoint(x, y)?.closest(".queue-card");
+let drag = null;
+
+function positionDrag() {
+  const { rows, source, startY, pointerY, scrollStart } = drag;
+  const offset = pointerY - startY + window.scrollY - scrollStart;
+  const center = source.top + source.height / 2 + offset;
+  const others = rows.filter(row => row !== source);
+  const before = others.find(row => center < row.top + row.height / 2);
+  drag.before = before?.card.dataset.key || null;
+  const destination = before ? others.indexOf(before) : others.length;
+  const origin = rows.indexOf(source);
+  for (const [i, row] of rows.entries()) {
+    let shift = 0;
+    if (row === source) shift = offset;
+    else if (origin < i && i <= destination) shift = -drag.step;
+    else if (destination <= i && i < origin) shift = drag.step;
+    row.card.style.transform = `translateY(${shift}px)`;
+  }
 }
-function setTarget(card) {
-  if (overKey === card?.dataset.key) return;
-  $(".queue-card.over")?.classList.remove("over");
-  overKey = card?.dataset.key;
-  if (overKey !== dragKey) card?.classList.add("over");
+
+function scrollDrag() {
+  if (!drag) return;
+  if (!drag.grip.isConnected) return clearDrag();
+  const distance = drag.pointerY < 64 ? -10 : drag.pointerY > innerHeight - 64 ? 10 : 0;
+  if (distance) {
+    window.scrollBy(0, distance);
+    positionDrag();
+  }
+  drag.frame = requestAnimationFrame(scrollDrag);
 }
+
 function clearDrag() {
-  dragKey = null;
-  overKey = null;
-  touch = null;
-  $(".queue-card.over")?.classList.remove("over");
-  $(".queue-card.dragging")?.classList.remove("dragging");
+  if (!drag) return;
+  const { rows, source, grip, pointer, frame } = drag;
+  drag = null;
+  cancelAnimationFrame(frame);
+  source.card.classList.remove("dragging");
+  for (const { card } of rows) card.style.removeProperty("transform");
+  if (grip.hasPointerCapture(pointer)) grip.releasePointerCapture(pointer);
 }
-function startDrag(card) {
-  dragKey = card.dataset.key;
-  card.classList.add("dragging");
-}
-async function dropOn(card, y) {
-  const key = dragKey,
-    target = card?.dataset.key;
-  clearDrag();
-  if (!key || !target || key === target) return;
-  const rect = card.getBoundingClientRect(),
-    keys = queueRecords(state.lane)
-      .map((r) => r.id)
-      .filter((id) => id !== key);
-  const before =
-    y > rect.top + rect.height / 2
-      ? keys[keys.indexOf(target) + 1] || null
-      : target;
-  await changePosition(key, before);
-}
-document.addEventListener("dragstart", (e) => {
-  if (!e.target.matches(".grip")) return;
-  const card = e.target.closest(".queue-card");
-  startDrag(card);
-  e.dataTransfer.setData("text/plain", dragKey);
-  e.dataTransfer.effectAllowed = "move";
-  e.dataTransfer.setDragImage(card, 16, 16);
-});
-document.addEventListener("dragover", (e) => {
-  if (!dragKey) return;
-  e.preventDefault();
-  setTarget(e.target.closest(".queue-card"));
-});
-document.addEventListener("drop", (e) => {
-  if (!dragKey) return;
-  e.preventDefault();
-  dropOn(e.target.closest(".queue-card"), e.clientY).catch((err) =>
-    toast(err.message),
-  );
-});
-document.addEventListener("dragend", clearDrag);
-document.addEventListener("pointerdown", (e) => {
+
+document.addEventListener("pointerdown", e => {
   const grip = e.target.closest(".grip");
-  if (e.pointerType === "mouse" || !grip) return;
-  touch = e.pointerId;
-  grip.setPointerCapture(touch);
-  startDrag(grip.closest(".queue-card"));
+  if (!grip || e.button !== 0 || !e.isPrimary || drag) return;
+  const rows = $$(".queue-card").map(card => {
+    const { top, height } = card.getBoundingClientRect();
+    return { card, top, height };
+  });
+  const source = rows.find(row => row.card.contains(grip));
+  if (!source || rows.length < 2) return;
+  drag = {
+    rows, source, grip, pointer: e.pointerId, startY: e.clientY, pointerY: e.clientY,
+    scrollStart: window.scrollY, step: source.height + rows[1].top - rows[0].top - rows[0].height,
+    before: null, frame: 0
+  };
+  grip.setPointerCapture(e.pointerId);
+  source.card.classList.add("dragging");
+  positionDrag();
+  drag.frame = requestAnimationFrame(scrollDrag);
 });
-document.addEventListener("pointermove", (e) => {
-  if (touch !== e.pointerId) return;
-  if (e.clientY < 80) window.scrollBy(0, -14);
-  else if (e.clientY > innerHeight - 80) window.scrollBy(0, 14);
-  setTarget(targetAt(e.clientY, e.clientX));
+
+document.addEventListener("pointermove", e => {
+  if (drag?.pointer !== e.pointerId) return;
+  drag.pointerY = e.clientY;
+  positionDrag();
 });
-document.addEventListener("pointerup", (e) => {
-  if (touch === e.pointerId)
-    dropOn(targetAt(e.clientY, e.clientX), e.clientY).catch((err) =>
-      toast(err.message),
-    );
+document.addEventListener("pointerup", async e => {
+  if (drag?.pointer !== e.pointerId) return;
+  drag.pointerY = e.clientY;
+  positionDrag();
+  const { rows, source, before, step } = drag;
+  const originalNext = rows[rows.indexOf(source) + 1]?.card.dataset.key || null;
+  // Hold the preview in its dropped position until the saved order is rendered.
+  const next = rows.find(row => row.card.dataset.key === before);
+  const last = rows[rows.length - 1];
+  const landingTop = next
+    ? next.top - (next.top > source.top ? step : 0)
+    : last.top + last.height - source.height;
+  const preview = rows.map(({card}) => card.style.transform);
+  clearDrag();
+  if (before === originalNext) return;
+  rows.forEach(({card}, i) => { card.style.transform = preview[i]; });
+  source.card.style.transform = `translateY(${landingTop - source.top}px)`;
+  try {
+    await changePosition(source.card.dataset.key, before);
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    rows.forEach(({card}) => card.style.removeProperty("transform"));
+  }
 });
-document.addEventListener("pointercancel", (e) => {
-  if (touch === e.pointerId) clearDrag();
+for (const event of ["pointercancel", "lostpointercapture"]) {
+  document.addEventListener(event, e => {
+    if (drag?.pointer === e.pointerId) clearDrag();
+  });
+}
+window.addEventListener("blur", clearDrag);
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") clearDrag();
 });
 document.addEventListener("keydown", async (e) => {
   const grip = e.target.closest(".grip");
