@@ -232,6 +232,30 @@ class WorkflowTest(unittest.TestCase):
             self.assertEqual("stats" in snapshot, page == "overview")
             self.assertEqual(len(snapshot["records"]), 2 if page in ("overview", "queue") else 0)
 
+    def test_priority_tag_survives_moves_edits_and_restore(self):
+        path = "/commissions"
+        target = self.api(path, "POST", {"nickname": "普通"})
+        self.assertFalse(target["is_priority"])
+        inserted = self.api(path + "?before=" + target["id"], "POST", {"nickname": "插队"})
+        key = path + "/" + inserted["id"]
+        self.assertTrue(inserted["is_priority"])
+        self.api(key + "/move", "POST", {"before": None})
+        self.api(key + "/defer", "POST")
+        current = self.api(key)
+        current.pop("is_priority")
+        current["payments"] = [{"amount": "1.00"}]
+        current = self.api(key, "PUT", current)
+        self.assertTrue(current["is_priority"])
+        self.assertTrue(self.api("/payments")[0]["is_priority"])
+        for marked in (False, True):
+            current = self.api(key, "PUT", {**current, "is_priority": marked})
+            self.assertIs(current["is_priority"], marked)
+        snapshot = self.api("/export")
+        next(r for r in snapshot["commissions"] if r["id"] == target["id"]).pop("is_priority")
+        self.api("/import", "POST", snapshot)
+        self.assertTrue(self.api(key)["is_priority"])
+        self.assertFalse(self.api(path + "/" + target["id"])["is_priority"])
+
     def test_overview_lane_totals_and_preview_order(self):
         for lane in ("normal", "deferred"):
             for i in range(6):

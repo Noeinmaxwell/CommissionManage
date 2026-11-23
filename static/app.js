@@ -94,8 +94,10 @@ function queueRecords(lane = "normal") {
       : r.status !== "已结稿" && r.queue === lane,
   );
 }
-function sampleTag(record) {
-  return record.sample ? '<span class="sample-tag">示例</span>' : "";
+function commissionTags(record) {
+  const sample = record.sample ? '<span class="sample-tag">示例</span>' : "";
+  const priority = record.is_priority ? '<span class="priority-tag">插队</span>' : "";
+  return [sample, priority].filter(Boolean).join(" ");
 }
 
 function toast(msg) {
@@ -262,7 +264,7 @@ function queuePreview(lane) {
     const nickname = `<button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(record.nickname)}</button>`;
     return `<tr data-action="detail" data-key="${esc(record.id)}">
       ${deferred ? "" : `<td>${String(index + 1).padStart(2, "0")}</td>`}
-      <td>${nickname}${deferred ? "" : sampleTag(record)}</td><td>${esc(record.title || "—")}</td>
+      <td>${nickname}${deferred ? "" : commissionTags(record)}</td><td>${esc(record.title || "—")}</td>
       ${deferred ? "" : `<td class="preview-date">${esc(record.planned || "待定")}</td><td>${statusTag(record.status)}</td>`}</tr>`;
   }).join("");
   return `<section class="card preview-${lane}"><div class="card-head"><h2>${icon(deferred ? "calendar" : "queue")}${heading}</h2>
@@ -323,7 +325,7 @@ function queueList() {
         <div class="queue-project">
           <div class="queue-client">
             <button class="namebtn" data-action="edit">${esc(r.nickname)}</button>
-            ${sampleTag(r)}
+            ${commissionTags(r)}
           </div>
           ${detail ? `<button class="project-title" data-action="brief" aria-expanded="false" aria-controls="brief-${esc(r.id)}">${esc(r.title?.trim() || "查看约稿需求")}</button>` : ""}
           <span class="queue-contact">${contact}</span>
@@ -371,7 +373,7 @@ async function openCommissionDetail(key) {
   ];
   dialog.dataset.key = key;
   dialog.innerHTML = `<div class="dialog-head"><h2 id="detailTitle">约稿详情</h2><button class="iconbtn" data-dismiss="commissionDetail" aria-label="关闭">${icon("x")}</button></div>
-    <div class="dialog-scroll"><section><h3>${esc(r.nickname)} ${statusTag(r.status)}</h3>
+    <div class="dialog-scroll"><section><h3>${esc(r.nickname)} ${commissionTags(r)} ${statusTag(r.status)}</h3>
     <dl class="detail-fields">${fields.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value || "—")}</dd></div>`).join("")}</dl></section>
     <section><h3>${esc(r.title || "约稿需求")}</h3><p class="detail-brief">${esc(r.requirements || "暂无详细需求")}</p>
     ${r.attachments.length ? `<div class="thumbs">${r.attachments.map((attachment, i) => `<div class="thumb">${thumbnailButton(attachment, i)}</div>`).join("")}</div>` : ""}</section>
@@ -390,7 +392,7 @@ function receiptList() {
   );
   if (!entries.length) return empty(query ? "没有匹配的收款" : "暂无收款记录");
   const cutoff = localDay();
-  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">约稿内容</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td class="receipt-title">${esc(p.title || "—")}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">约稿内容</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${commissionTags(p)}</td><td class="receipt-title">${esc(p.title || "—")}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function receiptsPage() {
   return (
@@ -539,7 +541,7 @@ function openEditor(key = null, before = null) {
   busy = false;
   $("#commissionForm").innerHTML =
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
- <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label></div></section>
+ <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label>${key ? `<label class="checkbox"><input type="checkbox" name="is_priority" ${r.is_priority ? "checked" : ""}>插队</label>` : ""}</div></section>
  <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="iconbtn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
@@ -620,7 +622,7 @@ async function submitRecord(e) {
     ...(!editing && state.page === "queue" && state.lane === "deferred"
       ? { queue: "deferred" }
       : {}),
-    ...(editing ? { revision: editingRevision } : {}),
+    ...(editing ? { revision: editingRevision, is_priority: f.is_priority.checked } : {}),
     nickname: f.nickname.value,
     contact_type: f.contact_type.value,
     contact: f.contact.value,

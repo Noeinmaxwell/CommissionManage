@@ -1633,7 +1633,8 @@ main > * {
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
-.sample-tag {
+.sample-tag,
+.priority-tag {
   display: inline-block;
   padding: 1px 5px;
   border: 1px solid #dce4ef;
@@ -1643,6 +1644,11 @@ main > * {
   font-weight: 500;
   vertical-align: middle;
   white-space: nowrap;
+}
+.priority-tag {
+  color: #825322;
+  background: #fff4df;
+  border-color: #e9cf9f;
 }
 .ledger-wrap {
   overflow-x: auto;

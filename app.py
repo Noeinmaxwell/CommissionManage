@@ -92,6 +92,7 @@ class Commission(BaseModel):
     contact: str = ""
     title: str = Field("", description="约稿内容，在卡片上显示的简短需求标题")
     requirements: str = ""
+    is_priority: bool = Field(False, description="插队标记，插入队列时自动设置，可在编辑时更改")
     brief_received: bool = False
     planned: Day | None = None
     started: Day | None = None
@@ -128,6 +129,7 @@ class Receipt(Payment):
     title: str = Field("", description="所属约稿的约稿内容（简短标题）")
     commission_id: str
     nickname: str
+    is_priority: bool = False
     sample: bool
 
 
@@ -509,6 +511,7 @@ def receipt_rows(records):
             p,
             commission_id=r["id"],
             title=r.get("title", ""),
+            is_priority=r.get("is_priority", False),
             nickname=r["nickname"],
             sample=r.get("sample", False),
         )
@@ -535,9 +538,12 @@ def create(
     """返回 201 和新约稿的 id。before 是同一队列中的约稿 ID，省略时排至队尾。重复提交会创建多条约稿。"""
     with database(True) as db:
         key = uuid4().hex
+        insert_before = before if item.status != "已结稿" else None
+        if insert_before:
+            item.is_priority = True
         saved = save(db, key, item)
-        if before and item.status != "已结稿":
-            move(db, key, before, item.queue)
+        if insert_before:
+            move(db, key, insert_before, item.queue)
         return saved
 
 
@@ -568,6 +574,8 @@ def update(key: str, item: CommissionUpdate):
             raise HTTPException(409, "约稿已被其他操作更新，请重新打开编辑窗口后再保存")
         if "title" not in item.model_fields_set:
             item.title = previous.get("title", "")
+        if "is_priority" not in item.model_fields_set:
+            item.is_priority = previous.get("is_priority", False)
         original = previous.get("queue", "normal")
         if "queue" not in item.model_fields_set:
             item.queue = original

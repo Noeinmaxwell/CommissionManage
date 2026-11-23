@@ -12,7 +12,7 @@
 
 1. GET /api/commissions?queue=normal 读取正常队列。延期使用 queue=deferred。查询已结稿使用 status=已结稿，省略 queue。每条记录的 id 是约稿 ID，同一甲方可有多份约稿。
 2. GET /api/commissions/{key} 读取单份约稿。GET /api/payments 按支付日期倒序返回明细，通过 commission_id 关联约稿，通过 title 读取约稿内容。
-3. POST /api/commissions 创建约稿，例 {"nickname":"小林","title":"角色头像","queue":"normal"}。201 响应中的 id 用于后续操作。
+3. POST /api/commissions 创建约稿，例 {"nickname":"小林","title":"角色头像","queue":"normal"}。传 ?before=同队约稿ID 可插队，系统会设置 is_priority=true。编辑时可以显式传入 true 或 false 来更改标记。201 响应中的 id 用于后续操作。
 4. PATCH /api/commissions/{key}/status，先发送 {"status":"进行中"} 开工，再发送 {"status":"已结稿"} 结稿。POST /api/commissions/{key}/move 传 {"before":null} 移至队尾，或传同队另一约稿 ID。
 5. POST /api/commissions/{key}/payments，例 {"amount":"360.00","stage":"定金","platform":"微信","date":"2026-02-28"}。返回更新后的约稿。追加收款必须传 Idempotency-Key 请求头，每笔新款使用不同键，同笔重试复用键和请求体。创建约稿超时后先读回核对。
 6. PUT /api/commissions/{key} 完整更新。先 GET 详情，在请求体传回 revision。遇到 409 时重新读取并对照用户修改。保留仍需保留的收款和附件数组，现有附件用 id 和 name 引用。新增附件用 name 和 Base64 data。删除约稿会一起删除附件。
