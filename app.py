@@ -20,6 +20,8 @@ from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import api_examples
+
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -524,10 +526,8 @@ def receipt_rows(records):
     response_model_exclude_none=True,
 )
 def create(
-    item: Annotated[Commission, Body(openapi_examples={
-        "queue": {"summary": "新增排队约稿", "value": {"nickname": "小林", "title": "角色头像", "queue": "normal"}}
-    })],
-    before: str | None = None,
+    item: Annotated[Commission, Body(openapi_examples=api_examples.CREATE)],
+    before: str | None = Query(None, openapi_examples={"insert": api_examples.example("插入到指定约稿前", "替换为同队约稿ID")}),
 ):
     """返回 201 和新约稿的 id。before 是同一队列中的约稿 ID，省略时排至队尾。重复提交会创建多条约稿。"""
     with database(True) as db:
@@ -560,7 +560,7 @@ def detail(key: str):
     response_model=VersionedCommission,
     response_model_exclude_none=True,
 )
-def update(key: str, item: CommissionUpdate):
+def update(key: str, item: Annotated[CommissionUpdate, Body(openapi_examples=api_examples.UPDATE)]):
     """先 GET 详情再修改字段并回传。保留完整 payments 数组及 attachments 中已有的 id，省略这些列表会清空相应数据。状态变更和追加收款优先使用专用接口。"""
     with database(True) as db:
         previous = lookup(db, key)
@@ -606,7 +606,7 @@ def remove(key: str):
     summary="调整排队位置",
     status_code=204,
 )
-def move_job(key: str, movement: Movement):
+def move_job(key: str, movement: Annotated[Movement, Body(openapi_examples=api_examples.MOVE)]):
     with database(True) as db:
         row = lookup(db, key)
         move(db, key, movement.before, row.get("queue", "normal"))
@@ -618,7 +618,7 @@ class StatusChange(BaseModel):
 
 
 @app.patch("/api/commissions/{key}/status", tags=["排队"], summary="开始约稿或结稿", status_code=204)
-def change_status(key: str, change: StatusChange):
+def change_status(key: str, change: Annotated[StatusChange, Body(openapi_examples=api_examples.STATUS)]):
     with database(True) as db:
         current = lookup(db, key)["status"]
         expected = "未开始" if change.status == "进行中" else "进行中"
@@ -664,9 +664,7 @@ def resume_job(key: str):
 )
 def pay(
     key: str,
-    payment: Annotated[Payment, Body(openapi_examples={
-        "deposit": {"summary": "收取定金", "value": {"amount": "360.00", "stage": "定金", "date": "2026-02-28"}}
-    })],
+    payment: Annotated[Payment, Body(openapi_examples=api_examples.PAYMENT)],
     idempotency_key: Annotated[str, Header(min_length=1, max_length=128, pattern=r"^[!-~]+$")],
 ):
     """追加一笔人民币收款并返回更新后的约稿。重试时使用同一 Idempotency-Key 和请求体。"""
@@ -760,7 +758,8 @@ class Client(BaseModel):
     summary="历史甲方联想，支持中文、拼音和首字母混输",
     response_model=list[Client],
 )
-def suggest(q: str = ""):
+def suggest(q: str = Query("", openapi_examples={"nickname": api_examples.example("按昵称搜索", "小林"),
+                                                "initials": api_examples.example("按拼音首字母搜索", "xl")})):
     with database() as db:
         found = {}
         for r in db.execute("SELECT body FROM jobs ORDER BY rowid DESC"):
@@ -790,7 +789,7 @@ def settings():
     summary="更新可选列表，第一项为默认值",
     response_model=Settings,
 )
-def set_options(item: Settings):
+def set_options(item: Annotated[Settings, Body(openapi_examples=api_examples.SETTINGS)]):
     with database(True) as db:
         db.execute("UPDATE settings SET body=? WHERE id=1", (item.model_dump_json(),))
         return item
@@ -1018,7 +1017,7 @@ def export_beancount():
     summary="原子替换为完整备份，失败会回滚",
     status_code=204,
 )
-def import_data(snapshot: Snapshot):
+def import_data(snapshot: Annotated[Snapshot, Body(openapi_examples=api_examples.IMPORT)]):
     ids = [r.id for r in snapshot.commissions]
     if len(ids) != len(set(ids)) or any(
         not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", i) for i in ids

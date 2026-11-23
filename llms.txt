@@ -10,6 +10,16 @@
 
 应用 API 直接接受请求，无需登录凭据。
 
+## 读取接口示例
+
+在 /docs 展开端点后，从 Examples 选择命名示例。程序可读取 /openapi.json 中 paths 下对应方法的 requestBody.content["application/json"].examples，每个示例的 value 都是 JSON 请求体。路径中的 key 和示例中的占位 ID 需要换成实际读取的值。POST /api/commissions/{key}/payments 还需要为新操作生成 Idempotency-Key。
+
+无请求体的调用示例：
+
+- GET /api/commissions?queue=deferred 查看延期队列。GET /api/stats?year=2025 查看指定年份。GET /api/workspace?page=overview&all_time=true 读取工作台和历史月份。
+- POST /api/commissions/{key}/defer 移入延期队尾，POST /api/commissions/{key}/resume 恢复排队，成功返回 204。
+- GET /api/export 下载完整备份。GET /api/export/csv 和 GET /api/export/beancount 下载财务报表。
+
 ## 从查询到操作
 
 1. GET /api/commissions?queue=normal 读取正常队列。延期使用 queue=deferred。查询已结稿使用 status=已结稿，省略 queue。每条记录的 id 是约稿 ID，同一甲方可有多份约稿。
