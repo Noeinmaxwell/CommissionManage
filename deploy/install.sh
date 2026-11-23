@@ -15,16 +15,6 @@ if ! python3 -m venv .venv; then
     python3 -m venv .venv
 fi
 .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
-if [[ $host != 127.* ]]; then
-    install -d -m 0700 /etc/commission-manage
-    # Publish the complete file atomically and preserve credentials on reinstall.
-    if [[ ! -e /etc/commission-manage/access.env ]]; then
-        credentials=$(mktemp /etc/commission-manage/.access.XXXXXX)
-        python3 -c 'import secrets; print("COMMISSION_ADMIN_PASSWORD=" + secrets.token_urlsafe(32)); print("COMMISSION_VIEWER_PASSWORD=" + secrets.token_urlsafe(32))' > "$credentials"
-        ln "$credentials" /etc/commission-manage/access.env || test -s /etc/commission-manage/access.env
-        rm -f "$credentials"
-    fi
-fi
 unit=$(mktemp)
 trap 'rm -f "$unit"' EXIT
 sed "s/--host 127.0.0.1/--host $host/" deploy/commission-manage.service > "$unit"
