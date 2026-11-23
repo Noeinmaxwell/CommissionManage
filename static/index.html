@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#f5f8fc" />
+    <title>工作台 · 稿序</title>
+    <link rel="icon" href="/static/logo.svg" />
+    <link rel="stylesheet" href="/static/style.css" />
+    <script defer src="/static/app.js"></script>
+  </head>
+  <body>
+    <a class="skip" href="#main">跳至主要内容</a>
+    <aside class="sidebar">
+      <a class="brand" href="#overview"
+        ><img src="/static/logo.svg" alt="" /><strong>稿序</strong></a
+      >
+      <nav aria-label="主要导航">
+        <a href="#overview" data-page="overview"
+          ><i data-icon="overview"></i>工作台</a
+        >
+        <a href="#queue" data-page="queue"
+          ><i data-icon="queue"></i>排队列表<b id="navCount" hidden></b
+        ></a>
+        <a href="#settings" data-page="settings"
+          ><i data-icon="settings"></i>设置</a
+        >
+      </nav>
+      <div class="sidefoot">
+        <a href="/docs" target="_blank" rel="noopener"
+          ><i data-icon="code"></i>API 文档<i data-icon="external"></i
+        ></a>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div>
+          <i data-icon="panel"></i><span>工作空间</span
+          ><span class="slash">/</span><strong id="crumb">工作台</strong>
+        </div>
+        <time id="clock"></time>
+      </header>
+      <main id="main" tabindex="-1"></main>
+    </div>
+    <dialog id="editor"><form id="commissionForm"></form></dialog>
+    <dialog id="confirm">
+      <div class="dialog-head">
+        <h2 id="confirmTitle"></h2>
+        <button class="iconbtn" aria-label="关闭" data-dismiss="confirm">
+          <i data-icon="x"></i>
+        </button>
+      </div>
+      <p id="confirmText"></p>
+      <div class="dialog-foot">
+        <button class="btn" data-dismiss="confirm">取消</button
+        ><button id="confirmYes" class="btn primary">确认</button>
+      </div>
+    </dialog>
+    <dialog id="lightbox">
+      <button class="iconbtn" data-dismiss="lightbox" aria-label="关闭预览">
+        <i data-icon="x"></i></button
+      ><img id="largeImage" alt="需求参考图" />
+      <div id="imageCaption"></div>
+    </dialog>
+    <div id="toast" role="status" aria-live="polite"></div>
+  </body>
+</html>
