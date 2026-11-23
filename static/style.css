@@ -1769,3 +1769,33 @@ main > * {
   font-size: 13px;
 }
 .detail-payment b { margin-left: auto; }
+
+button.metric { text-align: left; }
+button.metric:hover { border-color: #b7caef; }
+.metric-value,
+.metric-value > span { display: block; }
+.ledger .receipt-title {
+  max-width: 28ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.stage-field { position: relative; min-width: 0; }
+.stage-field label { display: grid; gap: 6px; }
+.stage-menu {
+  position: absolute;
+  inset: 100% 0 auto;
+  z-index: 3;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: var(--shadow);
+}
+.stage-menu [role="option"] {
+  padding: 4px 7px;
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+}
+.stage-menu [role="option"]:hover,
+.stage-menu [aria-selected="true"] { background: var(--pale); }

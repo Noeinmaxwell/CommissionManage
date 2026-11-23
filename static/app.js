@@ -64,6 +64,7 @@ const state = {
   settings: { contacts: [], platforms: [] },
   stats: null,
   months: 6,
+  incomePeriod: { total: 0, average: 0 },
   year: null,
   lane: "normal",
   receipts: [],
@@ -151,8 +152,20 @@ function title(text, action = "") {
 function art() {
   return `<div class="art" aria-hidden="true"><i class="sheet back"></i><i class="sheet"></i><div class="paper"><div class="rings">${"<i></i>".repeat(4)}</div><div class="squares">${"<i></i>".repeat(12)}</div></div><i class="pencil"></i></div>`;
 }
-function metric(label, n, ico, teal = false) {
-  return `<div class="metric"><span class="tile ${teal ? "teal" : ""}">${icon(ico)}</span><div><div class="metric-label">${label}</div><div class="number"><em>¥</em>${money(n)}</div></div></div>`;
+const incomeWindows = [0, 3, 6, 12];
+function metricContent(kind) {
+  const months = state.incomePeriod[kind];
+  const period = { 3: "近三月", 6: "近六月", 12: "近一年" }[months] || "";
+  const label = kind === "average" ? period + "每月平均收入" : (period || "过去总") + "收入";
+  const values = months ? state.stats.periods[months] : state.stats;
+  return `<span class="metric-label">${label}</span><span class="number"><em>¥</em>${money(values[kind])}</span>`;
+}
+function metric(kind) {
+  const average = kind === "average";
+  return `<button class="metric" data-action="cycle-income" data-kind="${kind}" title="点击切换统计周期">
+    <span class="tile ${average ? "teal" : ""}">${icon(average ? "trend" : "wallet")}</span>
+    <span class="metric-value" aria-live="polite">${metricContent(kind)}</span>
+  </button>`;
 }
 function monthlyChart(values) {
   const entries = Object.entries(values),
@@ -244,7 +257,7 @@ function overview() {
     records = queueRecords().slice(0, 4);
   return (
     title("工作台", button("新建约稿", "new", "plus", true)) +
-    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("过去总收入", s.total, "wallet")}${metric("每月平均收入", s.average, "trend", true)}</div></div>
+    `<div class="summary-grid"><section class="hero"><h2 class="hero-title">${icon("calendar")}当前排期</h2><div class="hero-stats"><div><span>排队中的甲方</span><strong>${s.count}<small>位</small></strong></div><div><span>预计排期至</span><strong class="scheduled" title="${esc(s.until || "")}">${s.until ? s.until.slice(5).replace("-", " / ") : "—"}</strong>${s.until ? `<span>${s.until.slice(0, 4)} 年</span>` : ""}</div></div>${art()}</section><div class="metric-stack">${metric("total")}${metric("average")}</div></div>
  <div class="charts"><section class="card"><div class="card-head"><h2>${icon("chart")}每月收入</h2><select class="select-small" id="months" aria-label="图表月份">${[3, 6, 12].map((n) => `<option value="${n}" ${!state.year && n === state.months ? "selected" : ""}>近 ${n} 个月</option>`).join("")}<option value="all" ${!state.year && state.months === "all" ? "selected" : ""}>全部时间</option>${s.years.map((year) => `<option value="y${year}" ${year === state.year ? "selected" : ""}>${year} 年</option>`).join("")}</select></div><small class="chart-unit">金额（元）</small>${monthlyChart(s.monthly)}</section><section class="card"><div class="card-head"><h2>${icon("pie")}收入来源</h2><span class="chart-unit">累计收入占比</span></div>${platforms()}</section></div>
  <section class="card"><div class="card-head"><h2>${icon("queue")}排队预览</h2><a href="#queue" class="linkbtn">查看全部 ${icon("arrow")}</a></div>${records.length ? `<table class="compact-table"><thead><tr><th>顺位</th><th>甲方</th><th>预计开始</th><th>结稿状态</th></tr></thead><tbody>${records.map((r, i) => `<tr data-action="detail" data-key="${r.id}"><td>${String(i + 1).padStart(2, "0")}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(r.nickname)}</button> ${sampleTag(r)}</td><td>${esc(r.planned || "待定")}</td><td>${statusTag(r.status)}</td></tr>`).join("")}</tbody></table>` : empty("暂无排队中的约稿", true)}</section>`
   );
@@ -349,18 +362,18 @@ function openCommissionDetail(key) {
 function receiptList() {
   const query = state.receiptQuery.trim().toLowerCase();
   const entries = state.receipts.filter((p) =>
-    [p.nickname, p.stage, p.platform, p.date].some((v) =>
+    [p.nickname, p.title || "", p.stage, p.platform, p.date].some((v) =>
       v.toLowerCase().includes(query),
     ),
   );
   if (!entries.length) return empty(query ? "没有匹配的收款" : "暂无收款记录");
   const cutoff = localDay();
-  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
+  return `<div class="ledger-wrap"><table class="compact-table ledger"><caption>${entries.length} 笔记录</caption><thead><tr><th scope="col">支付日期</th><th scope="col">甲方</th><th scope="col">约稿内容</th><th scope="col">稿期阶段</th><th scope="col">支付方式</th><th scope="col">金额（元）</th></tr></thead><tbody>${entries.map((p) => `<tr data-action="detail" data-key="${esc(p.commission_id)}"><td><time>${esc(p.date)}</time>${p.date > cutoff ? " <small>待入账</small>" : ""}</td><td><button class="namebtn" data-action="detail" aria-haspopup="dialog">${esc(p.nickname)}</button> ${sampleTag(p)}</td><td class="receipt-title">${esc(p.title || "—")}</td><td>${esc(p.stage)}</td><td>${esc(p.platform)}</td><td class="receipt-amount">¥${money(p.amount)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 function receiptsPage() {
   return (
     title("收款记录") +
-    `<section class="card"><div class="card-head"><h2>${icon("wallet")}收款明细</h2><label class="search">${icon("search")}<input id="receiptQuery" aria-label="搜索收款记录" placeholder="搜索甲方、日期或平台" value="${esc(state.receiptQuery)}"></label></div><div id="receiptList">${receiptList()}</div></section>`
+    `<section class="card"><div class="card-head"><h2>${icon("wallet")}收款明细</h2><label class="search">${icon("search")}<input id="receiptQuery" aria-label="搜索收款记录" placeholder="搜索甲方、约稿或收款" value="${esc(state.receiptQuery)}"></label></div><div id="receiptList">${receiptList()}</div></section>`
   );
 }
 function optionCard(key, label, ico) {
@@ -369,7 +382,7 @@ function optionCard(key, label, ico) {
 function settingsPage() {
   return (
     title("设置") +
-    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>导出约稿、收款、设置和原图。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.records.some((r) => r.sample) ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a></div></section></div>`
+    `<div class="settings-grid">${optionCard("platforms", "支付方式", "wallet")}${optionCard("contacts", "联系方式", "contact")}<section class="card"><div class="card-head"><h2>${icon("backup")}数据备份</h2></div><p>JSON 备份包含设置和原图，CSV 导出约稿与收款明细，Beancount 导出账本。注意仅支持json格式导入。导入会替换当前数据。</p><div class="buttons"><a class="btn" href="/api/export" download>${icon("backup")}导出 JSON</a><a class="btn" href="/api/export/csv" download>导出 CSV</a><a class="btn" href="/api/export/beancount" download>导出 Beancount</a><label class="btn attach-label">导入备份<input id="importFile" type="file" accept=".json,application/json"></label></div></section><section class="card"><div class="card-head"><h2>${icon("queue")}示例数据</h2></div><p>包含正常排队、延期、结稿和分期收款记录。</p><div class="buttons">${state.records.some((r) => r.sample) ? button("清除示例", "clear-examples") : button("加载示例", "load-examples", "plus")}</div></section><section class="card"><div class="card-head"><h2>${icon("code")}API 文档</h2></div><p>在线查看并调试接口，或下载 OpenAPI 定义。</p><div class="buttons"><a class="btn" href="/docs" target="_blank" rel="noopener">交互文档 ${icon("external")}</a><a class="linkbtn" href="/openapi.json" download="openapi.json">下载 OpenAPI</a><a class="linkbtn" href="/llms.txt" target="_blank" rel="noopener">智能体调用指南</a></div></section></div>`
   );
 }
 function render() {
@@ -432,10 +445,65 @@ function normalizeDay(raw) {
 function dateField(name, label, value) {
   return `<div class="field-label"><label>${label}<span class="datewrap"><input class="control day" name="${name}" aria-label="${label}" placeholder="如 260228" value="${esc(value)}" autocomplete="off"></span></label><span class="datepick"><input type="date" aria-label="选择${label}" value="${esc(value)}">${icon("calendar")}</span><small class="datehint"></small></div>`;
 }
+let stageMenuId = 0;
+function setupStageMenu(row) {
+  const input = row.querySelector('[name="stage"]');
+  const menu = row.querySelector(".stage-menu");
+  menu.id = "stage-options-" + ++stageMenuId;
+  input.setAttribute("aria-controls", menu.id);
+  let active = -1;
+  function close() {
+    menu.hidden = true;
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    active = -1;
+  }
+  function open() {
+    close();
+    const options = ["稿费", "定金", "阶段款", "尾款"].filter(stage => stage.includes(input.value.trim()));
+    if (!options.length) return;
+    menu.innerHTML = options.map((stage, i) =>
+      `<div role="option" id="${menu.id}-${i}" aria-selected="false">${stage}</div>`).join("");
+    menu.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+  }
+  function select(option) {
+    input.value = option.textContent;
+    close();
+  }
+  input.addEventListener("focus", open);
+  input.addEventListener("click", open);
+  input.addEventListener("input", open);
+  input.addEventListener("blur", close);
+  menu.addEventListener("pointerdown", e => e.preventDefault());
+  menu.addEventListener("click", e => {
+    if (e.target.matches('[role="option"]')) select(e.target);
+  });
+  input.addEventListener("keydown", e => {
+    if (e.isComposing) return;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (menu.hidden) open();
+      if (menu.hidden) return;
+      e.preventDefault();
+      const options = Array.from(menu.children);
+      active = e.key === "ArrowDown" ? (active + 1) % options.length
+        : (active <= 0 ? options.length - 1 : active - 1);
+      options.forEach((option, i) => option.setAttribute("aria-selected", String(i === active)));
+      input.setAttribute("aria-activedescendant", options[active].id);
+    } else if (!menu.hidden && e.key === "Enter" && active >= 0) {
+      e.preventDefault();
+      select(menu.children[active]);
+    } else if (!menu.hidden && e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+}
 function paymentRow(p = {}) {
   const el = document.createElement("div");
   el.className = "payment";
-  el.innerHTML = `<label class="field-label">金额（元）<input class="control" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" value="${esc(p.amount)}" required></label><label class="field-label">稿期阶段<input class="control" name="stage" list="stages" placeholder="稿费" value="${esc(p.stage)}"></label>${dateField("paydate", "支付日期", p.date || localDay())}<label class="field-label">支付方式<select class="control" name="platform">${choices(state.settings.platforms, p.platform)}</select></label><button class="iconbtn" type="button" data-action="remove-payment" aria-label="移除此笔稿费">${icon("x")}</button>`;
+  el.innerHTML = `<label class="field-label">金额（元）<input class="control" name="amount" type="number" min="0.01" step="0.01" placeholder="0.00" value="${esc(p.amount)}" required></label><div class="field-label stage-field"><label>稿期阶段<input class="control" name="stage" role="combobox" aria-expanded="false" aria-autocomplete="list" autocomplete="off" placeholder="稿费" value="${esc(p.stage)}"></label><div class="stage-menu" role="listbox" aria-label="稿期阶段推荐" hidden></div></div>${dateField("paydate", "支付日期", p.date || localDay())}<label class="field-label">支付方式<select class="control" name="platform">${choices(state.settings.platforms, p.platform)}</select></label><button class="iconbtn" type="button" data-action="remove-payment" aria-label="移除此笔稿费">${icon("x")}</button>`;
+  setupStageMenu(el);
   return el;
 }
 function openEditor(key = null, before = null) {
@@ -451,7 +519,7 @@ function openEditor(key = null, before = null) {
   $("#commissionForm").innerHTML =
     `<div class="dialog-head"><h2>${key ? "编辑约稿" : before ? "插入约稿" : "新建约稿"}</h2><button class="iconbtn" type="button" data-dismiss="editor" aria-label="关闭">${icon("x")}</button></div>
  <div class="dialog-scroll"><section><div class="formgrid"><div class="field-label span2 suggest-wrap"><label for="nickname">甲方昵称</label><input class="control" id="nickname" name="nickname" value="${esc(r.nickname)}" autocomplete="off" placeholder="输入昵称，或留空自动编号"><div class="suggestions" id="suggestions"></div></div><label class="field-label">联系方式<select class="control" name="contact_type">${choices(state.settings.contacts, r.contact_type)}</select></label><label class="field-label">联系账号<input class="control" name="contact" placeholder="账号或主页链接" value="${esc(r.contact)}"></label>${dateField("planned", "预计开始", r.planned)}${dateField("started", "实际开始", r.started)}<label class="field-label">结稿状态<select class="control" name="status">${choices(["未开始", "进行中", "已结稿"], r.status)}</select></label><label class="checkbox"><input type="checkbox" name="brief_received" ${r.brief_received ? "checked" : ""}>已交付需求</label></div></section>
- <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div><datalist id="stages"><option>稿费</option><option>定金</option><option>阶段款</option><option>尾款</option></datalist></section>
+ <section><div class="section-head"><h3>稿费</h3><button class="linkbtn" type="button" data-action="add-payment">${icon("plus")}添加稿费</button></div><div class="payments" id="payments"></div></section>
  <section><label class="field-label brief-field">约稿内容<input class="control" name="brief_title" placeholder="简短的需求标题" value="${esc(r.title)}"></label><div class="section-head"><h3>需求与参考图</h3><label class="linkbtn attach-label">${icon("image")}添加图片<input id="files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label></div><textarea aria-label="需求说明" name="requirements" placeholder="填写约稿需求">${esc(r.requirements)}</textarea><div class="thumbs" id="thumbs"></div></section></div>
  <div class="form-error" role="alert" id="formError"></div><div class="dialog-foot">${key ? '<button class="iconbtn danger" type="button" data-action="delete">删除</button>' : ""}<button class="btn" type="button" data-dismiss="editor">取消</button><button id="save" class="btn primary">保存约稿</button></div>`;
   (r.payments || []).forEach((p) => $("#payments").append(paymentRow(p)));
@@ -631,6 +699,18 @@ async function onClick(event) {
   const key = b.closest("[data-key]")?.dataset.key,
     action = b.dataset.action;
   switch (action) {
+    case "cycle-income": {
+      const kind = b.dataset.kind;
+      const index = incomeWindows.indexOf(state.incomePeriod[kind]);
+      state.incomePeriod[kind] = incomeWindows[(index + 1) % incomeWindows.length];
+      const value = b.querySelector(".metric-value");
+      value.innerHTML = metricContent(kind);
+      if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        value.animate([{ opacity: 0.35, transform: "translateY(5px)" }, { opacity: 1, transform: "none" }],
+          { duration: 200, easing: "ease-out" });
+      }
+      break;
+    }
     case "refresh":
       await refresh();
       break;

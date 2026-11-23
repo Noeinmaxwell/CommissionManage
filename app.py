@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import csv
 import json
 import os
 import re
@@ -12,15 +13,15 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from importlib.resources import files
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from typing import Annotated, Literal
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi import Body, FastAPI, HTTPException, Query, Request, Response
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, BeforeValidator, Field, field_validator
@@ -113,6 +114,7 @@ class Card(Saved):
 
 
 class Receipt(Payment):
+    title: str = Field("", description="所属约稿的约稿内容（简短标题）")
     commission_id: str
     nickname: str
     sample: bool
@@ -173,7 +175,7 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None,
     lifespan=lifespan,
-    description="以人民币记账。日期支持 YYYY-MM-DD、YYYYMMDD、YYMMDD。所有操作均可在此调用。",
+    description="智能体请先读 [API 调用指南](/llms.txt)，再按本 OpenAPI 定义构造请求。以 CNY 记账，日期使用上海时区。日期支持 YYYY-MM-DD、YYYYMMDD、YYMMDD。",
 )
 
 
@@ -386,6 +388,7 @@ def receipts():
             dict(
                 p,
                 commission_id=r["id"],
+                title=r.get("title", ""),
                 nickname=r["nickname"],
                 sample=r.get("sample", False),
             )
@@ -403,7 +406,13 @@ def receipts():
     response_model=Saved,
     response_model_exclude_none=True,
 )
-def create(item: Commission, before: str | None = None):
+def create(
+    item: Annotated[Commission, Body(openapi_examples={
+        "queue": {"summary": "新增排队约稿", "value": {"nickname": "小林", "title": "角色头像", "queue": "normal"}}
+    })],
+    before: str | None = None,
+):
+    """返回 201 和新约稿的 id。before 是同一队列中的约稿 ID，省略时排至队尾。重复提交会创建多条约稿。"""
     with database(True) as db:
         key = uuid4().hex
         saved = save(db, key, item)
@@ -432,6 +441,7 @@ def detail(key: str):
     response_model_exclude_none=True,
 )
 def update(key: str, item: Commission):
+    """先 GET 详情再修改字段并回传。保留完整 payments 数组及 attachments 中已有的 id，省略这些列表会清空相应数据。状态变更和追加收款优先使用专用接口。"""
     with database(True) as db:
         previous = lookup(db, key)
         if "title" not in item.model_fields_set:
@@ -528,7 +538,13 @@ def resume_job(key: str):
     response_model=Saved,
     response_model_exclude_none=True,
 )
-def pay(key: str, payment: Payment):
+def pay(
+    key: str,
+    payment: Annotated[Payment, Body(openapi_examples={
+        "deposit": {"summary": "收取定金", "value": {"amount": "360.00", "stage": "定金", "date": "2026-02-28"}}
+    })],
+):
+    """追加一笔人民币收款并返回更新后的约稿。重复提交会重复入账。"""
     with database(True) as db:
         previous = lookup(db, key)
         item = Commission.model_validate(previous)
@@ -643,7 +659,14 @@ def set_options(item: Settings):
         return item
 
 
+class PeriodIncome(BaseModel):
+    total: float
+    average: float
+
+
 class Statistics(BaseModel):
+    periods: dict[int, PeriodIncome] = Field(description="3、6、12 个自然月的收入与月均，含本月，零收入月参与平均")
+
     count: int
     until: date | None
     total: float
@@ -689,7 +712,12 @@ def stats(
     if all_time and year is None:
         first = min(totals, default=current)
     last = min(first + 11, current) if year else current
+    periods = {}
+    for length in (3, 6, 12):
+        subtotal = sum((totals.get(m, 0) for m in range(current - length + 1, current + 1)), Decimal(0))
+        periods[length] = {"total": subtotal, "average": round(subtotal / length, 2)}
     return {
+        "periods": periods,
         "count": len(active),
         "until": max((r["planned"] for r in active if r["planned"]), default=None),
         "total": total,
@@ -723,6 +751,56 @@ def export_data(response: Response):
             f'attachment; filename="commission-{today()}.json"'
         )
         return {"version": 1, "settings": options(db), "commissions": records}
+
+
+def download_text(content, extension, media_type):
+    filename = f"commission-{today()}.{extension}"
+    return Response(content, media_type=media_type, headers={
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    })
+
+
+@app.get("/api/export/csv", tags=["数据"], summary="下载约稿与收款 CSV，每笔收款一行，无收款约稿也保留一行",
+         response_class=Response, responses={200: {"content": {"text/csv": {}}}})
+def export_csv():
+    with database() as db:
+        records = rows(db)
+    out = StringIO(newline="")
+    writer = csv.writer(out)
+    writer.writerow(["约稿ID", "甲方", "联系方式", "联系账号", "约稿内容", "需求说明", "队列", "状态",
+                     "预计开始", "实际开始", "支付日期", "稿期阶段", "支付方式", "金额(CNY)"])
+    for r in records:
+        for payment in r["payments"] or [{}]:
+            cells = [r["id"], r["nickname"], r["contact_type"], r["contact"], r.get("title", ""),
+                     r["requirements"], r.get("queue", "normal"), r["status"], r["planned"], r["started"],
+                     payment.get("date"), payment.get("stage"), payment.get("platform"), payment.get("amount")]
+            # Preserve formula-like text as literal text when opened in a spreadsheet.
+            writer.writerow("'" + c if isinstance(c, str) and c.lstrip().startswith(("=", "+", "-", "@"))
+                            else c for c in cells)
+    return download_text(out.getvalue().encode("utf-8-sig"), "csv", "text/csv")
+
+
+def ledger_string(value):
+    # Keep each Beancount string on its directive line, including user-entered notes.
+    return json.dumps(" ".join(value.splitlines()), ensure_ascii=False)
+
+
+@app.get("/api/export/beancount", tags=["数据"], summary="下载 CNY 双重记账账本，每笔收款对应一笔交易",
+         response_class=PlainTextResponse)
+def export_beancount():
+    entries = sorted(receipts(), key=lambda entry: entry["date"])
+    first = entries[0]["date"] if entries else today().isoformat()
+    lines = ['option "operating_currency" "CNY"', "",
+             f"{first} open Assets:CommissionReceipts CNY", f"{first} open Income:Commissions CNY"]
+    for entry in entries:
+        amount = Decimal(entry["amount"])
+        narration = " · ".join(filter(None, [entry["title"], entry["stage"]]))
+        lines.extend(["", f'{entry["date"]} * {ledger_string(entry["nickname"])} {ledger_string(narration)}',
+                      f'  commission_id: {ledger_string(entry["commission_id"])}',
+                      f'  platform: {ledger_string(entry["platform"])}',
+                      f"  Assets:CommissionReceipts  {amount:.2f} CNY",
+                      f"  Income:Commissions  {-amount:.2f} CNY"])
+    return download_text("\n".join(lines) + "\n", "beancount", "text/plain")
 
 
 @app.post(
@@ -794,6 +872,11 @@ def remove_examples():
     with database(True) as db:
         db.execute("DELETE FROM jobs WHERE json_extract(body,'$.sample')=1")
     return Response(status_code=204)
+
+
+@app.get("/llms.txt", include_in_schema=False)
+def agent_guide():
+    return FileResponse(ROOT / "llms.txt", media_type="text/plain")
 
 
 @app.get("/docs", include_in_schema=False)

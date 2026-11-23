@@ -1,6 +1,7 @@
 """Regression checks for queue changes, accounting and transactional backup restore."""
 
 import base64
+import csv
 import json
 import os
 import socket
@@ -12,7 +13,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -154,6 +155,34 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(stats["current"], 1)
         self.assertEqual(stats["average"], 1.02)
         self.assertEqual(stats["platforms"], {"微信": 1.05, "支付宝": 1})
+
+    def test_financial_exports_and_periods(self):
+        now = today()
+        month = now.year * 12 + now.month - 1
+        title = '头像, "海岸"'
+        def payment_at(offset, amount):
+            year, index = divmod(month - offset, 12)
+            return {"date": f"{year:04d}-{index + 1:02d}-01", "amount": amount}
+        self.api("/commissions", "POST", {
+            "nickname": "=甲方", "title": title,
+            "payments": [payment_at(0, 30), payment_at(2, 60), payment_at(3, 90),
+                         payment_at(6, 180), payment_at(12, 300),
+                         {"date": (now + timedelta(days=1)).isoformat(), "amount": 5}]
+        })
+        self.api("/commissions", "POST", {"nickname": "无收款"})
+        self.assertEqual(self.api("/stats?months=1")["periods"], {
+            "3": {"total": 90, "average": 30}, "6": {"total": 180, "average": 30},
+            "12": {"total": 360, "average": 30}
+        })
+        self.assertTrue(all(p["title"] == title for p in self.api("/payments")))
+        csv_rows = list(csv.DictReader(StringIO(self.api("/export/csv").decode("utf-8-sig"))))
+        self.assertEqual(len(csv_rows), 7)
+        self.assertEqual(csv_rows[0]["约稿内容"], title)
+        self.assertEqual(csv_rows[0]["甲方"], "'=甲方")
+        self.assertEqual(csv_rows[-1]["金额(CNY)"], "")
+        ledger = self.api("/export/beancount").decode()
+        self.assertEqual(ledger.count(' * "=甲方"'), 6)
+        self.assertIn("Income:Commissions  -60.00 CNY", ledger)
 
     def test_all_time_includes_quiet_months(self):
         now = today()

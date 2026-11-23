@@ -1,0 +1,26 @@
+# 稿序 CommissionManage API
+
+> 面向 Codex、DeepSeek Harness 等 HTTP 客户端的调用指南。
+
+- [OpenAPI 3.1](/openapi.json) 提供当前实例的 HTTP 方法、路径、字段类型、必填项和枚举。
+- [交互文档](/docs) 提供可执行示例。以下路径均相对于当前服务地址。写入 JSON 时使用 Content-Type: application/json。
+- 金额以人民币元计，最多两位小数。日期建议用 YYYY-MM-DD。收入按上海日期统计，未来收款在支付当天计入。
+
+## 从查询到操作
+
+1. GET /api/commissions?queue=normal 读取正常队列。延期使用 queue=deferred。查询已结稿使用 status=已结稿，省略 queue。每条记录的 id 是约稿 ID，同一甲方可有多份约稿。
+2. GET /api/commissions/{key} 读取单份约稿。GET /api/payments 按支付日期倒序返回明细，通过 commission_id 关联约稿，通过 title 读取约稿内容。
+3. POST /api/commissions 创建约稿，例 {"nickname":"小林","title":"角色头像","queue":"normal"}。201 响应中的 id 用于后续操作。
+4. PATCH /api/commissions/{key}/status，先发送 {"status":"进行中"} 开工，再发送 {"status":"已结稿"} 结稿。POST /api/commissions/{key}/move 传 {"before":null} 移至队尾，或传同队另一约稿 ID。
+5. POST /api/commissions/{key}/payments，例 {"amount":"360.00","stage":"定金","platform":"微信","date":"2026-02-28"}。返回更新后的约稿。创建约稿和追加收款都会产生新记录，超时后先读回核对。
+6. PUT /api/commissions/{key} 完整更新。先 GET 详情，保留仍需保留的收款和附件数组，现有附件用 id 和 name 引用。新增附件用 name 和 Base64 data。删除约稿会一起删除附件。
+
+## 统计与文件
+
+- GET /api/stats 返回累计实收、月均、每月柱图数据和平台汇总。periods 的键为 "3"、"6"、"12"，各含 total 和 average。统计窗口含本月，零收入月计入分母。monthly 可按 months、year 或 all_time=true 查询，periods 独立于图表区间。
+- GET /api/export 下载含原图和设置的 JSON 快照。POST /api/import 接收该快照，会在同一事务内替换当前全部数据。
+- GET /api/export/csv 导出约稿与逐笔收款，GET /api/export/beancount 导出双重记账交易。这两种格式仅供导出。
+
+## 响应处理
+
+200 或 201 的 JSON 按响应模型读取；204 没有正文。错误消息在 detail。404 表示目标不存在，409 表示当前队列或状态与请求冲突，重新读取后再决定操作。422 表示输入校验失败，detail 可以是字符串，也可以是带 loc 和 msg 的错误列表。
