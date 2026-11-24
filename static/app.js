@@ -399,7 +399,7 @@ function queueList() {
         </div>
         <div class="queue-schedule">
           <div class="queue-value"><span>预计开始</span><b>${esc(r.planned || "待定")}</b></div>
-          <div class="queue-progress">${statusTag(r.status)}<span>${r.brief_received ? "已交需求" : "待交需求"}</span>${Number(r.agreed_total) > 0 ? `<span class="agreed-total" title="付款约定合计">¥${money(r.agreed_total)}</span>` : ""}</div>
+          <div class="queue-progress">${statusTag(r.status)}<span class="queue-brief">${r.brief_received ? "已交需求" : "待交需求"}${Number(r.agreed_total) > 0 ? `<span class="agreed-total" title="付款约定合计">¥${money(r.agreed_total)}</span>` : ""}</span></div>
         </div>
         <div class="client-history">
           <div class="queue-value"><span>累计收款</span><b>¥${money(r.history.total)}</b></div>
